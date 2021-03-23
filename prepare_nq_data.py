@@ -239,7 +239,25 @@ def create_example_from_jsonl(line):
         if annotation["yes_no_answer"] in ("YES", "NO"):
             answer["input_text"] = annotation["yes_no_answer"].lower()
 
-    # Add a long answer if one was found.
+    # Add a short answer if one was found.
+    if annotated_sa != (-1, -1):
+        answer["input_text"] = "short"
+        span_text = get_candidate_text(e, annotated_idx).text
+        answer["span_text"] = span_text[annotated_sa[0] : annotated_sa[1]]
+        answer["span_start"] = annotated_sa[0]
+        answer["span_end"] = annotated_sa[1]
+        expected_answer_text = get_text_span(
+            e,
+            {
+                "start_token": annotation["short_answers"][0]["start_token"],
+                "end_token": annotation["short_answers"][-1]["end_token"],
+            },
+        ).text
+        assert expected_answer_text == answer["span_text"], (
+            expected_answer_text,
+            answer["span_text"],
+        )
+        # Add a long answer if one was found.
     elif annotation and annotation["long_answer"]["candidate_index"] >= 0:
         answer["span_text"] = get_candidate_text(e, annotated_idx).text
         answer["span_start"] = 0

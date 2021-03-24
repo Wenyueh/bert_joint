@@ -144,7 +144,7 @@ def create_example(args, data):
 
         example = {
             "name": data["document_title"],
-            "id": data["example_id"],
+            "id": str(data["example_id"]),
             "question": [data["question_text"]],
             "answer": [answer],
             "has_correct_candidate": candidate_idx in candidate_indices,
@@ -153,9 +153,11 @@ def create_example(args, data):
         }
 
     else:
+        answer["type"] = "UNKNOWN"
+
         example = {
             "name": data["document_title"],
-            "id": data["example_id"],
+            "id": str(data["example_id"]),
             "question": [data["question_text"]],
             "answer": [answer],
             "has_correct_candidate": False,
@@ -241,6 +243,7 @@ def compute_offset(data, token_idx_1, token_idx_2):
     return char_offset
 
 
+# tested correct
 def filtered_candidates(args, data):
     filtered_candidates = []
     for idx, cand in enumerate(data["long_answer_candidates"]):

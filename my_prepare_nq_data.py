@@ -5,6 +5,7 @@ import torch
 import argparse
 import enum
 from transformers import BertTokenizer
+import re
 
 # get_example
 # for each dictionary extracted:
@@ -112,8 +113,6 @@ def create_example(args, data):
                 candidate_idx = idx
     else:
         answer["type"] = "unknown"
-        answer["span_start"] = 29
-        answer["span_end"] = 29  # length of [ContextID=-1] [NoLongAnswer]
 
         # aggregate candidate list
         # add an empty candidate at the beginning
@@ -302,22 +301,22 @@ class NQExample:
         self.question = question
         self.doc_tokens = doc_tokens
         self.doc_tokens_map = doc_tokens_map
-        self.answer = None
-        self.start_position = None
-        self.end_position = None
+        self.answer = answer
+        self.start_position = start_position
+        self.end_position = end_position
 
 
 class process_example:
-    def __init__(self, args, tokenizer):
-        self.train = args.train
-        self.tokenizer = tokenizer
+    def __init__(self, args):
+        self.args = args
+        self.tokenizer = BertTokenizer.from_pretrained(args.tokenizer)
 
     def process(self, example):
-        nq_example = return_nq_example(self.train, example)
-        input_feature = example2feature(nq_example)
+        nq_example = return_nq_example(example)
+        input_feature = example2feature(self.args, nq_example, self.tokenizer)
 
 
-def return_nq_example(train, example):
+def return_nq_example(example):
     doc_tokens = example["candidates"].split()
     char_to_token_offset = []
     for idx, token in enumerate(doc_tokens):
@@ -336,7 +335,7 @@ def return_nq_example(train, example):
     start_token_position = None
     end_token_position = None
 
-    if train:
+    if args.train:
 
         Answer = collections.namedtuple("Answer", "type text offset")
 
@@ -380,7 +379,9 @@ def return_nq_example(train, example):
         end_token_position = char_to_token_offset[start_position + len(answer_text)]
 
         # check whether the provided answer text is in the actual doc_tokens
-        actual_text = " ".join(doc_tokens[start_token_position:end_token_position])
+        actual_text = " ".join(
+            doc_tokens[start_token_position : end_token_position + 1]
+        )
 
         cleaned_answer_text = " ".join(answer_text.split())
         if actual_text.find(cleaned_answer_text) == -1:
@@ -395,22 +396,212 @@ def return_nq_example(train, example):
                 % (cleaned_answer_text, actual_text)
             )
 
-        returned_example = NQExample(
-            example["id"],
-            question_id,
-            question_text,
-            doc_tokens,
-            example["candidates_map"],
-            answer,
-            start_token_position,
-            end_token_position,
-        )
+    returned_example = NQExample(
+        example["id"],
+        question_id,
+        question_text,
+        doc_tokens,
+        example["candidates_map"],
+        answer,
+        start_token_position,
+        end_token_position,
+    )
 
     return returned_example
 
 
-def example2feature(nq_example):
-    pass
+# 1. change from tokens to sub-tokens:
+# (a) index mapping from orig to token and token to orig (using doc_tokens_map)
+# (b) collect all_doc_tokens
+# 2. query:
+# [Q], tokenize to max_length
+# 3. answer:
+# map word_based start to tok_based start
+# 4. sliding window to create doc up to max_seq_len
+# (a) start_offset
+# (b) length of each doc
+# CLS + query + SEP + doc_tokens
+# segment_id 0 for CLS + query + SEP, 1 for doc_tokens
+# SEP, segment_id 1
+# input_ids = convert toks to corresponding ids
+# padding by 0
+# modify correspondingly input_ids, input_mask, segment_ids
+def example2feature(args, nq_example, tokenizer):
+
+    tokenized_doc_tokens = []
+    orig_to_tokenized_map = []
+    tokenized_to_orig_map = []
+    for idx, tok in enumerate(nq_example.doc_tokens):
+        tokens = tokenize(tokenizer, tok.split())
+        tokenized_doc_tokens.extend(tokens)
+        orig_to_tokenized_map.append(len(tokenized_doc_tokens))
+        # map tokenized to natural numbers, not the actual index of doc_tokens
+        tokenized_to_orig_map.extend(len(tokens) * [idx])
+
+    # the actual index of doc_tokens
+    if nq_example.doc_tokens_map:
+        tokenized_to_orig_map = [
+            nq_example.doc_tokens_map[i] for i in tokenized_to_orig_map
+        ]
+
+    assert len(tokenized_doc_tokens) == len(tokenized_to_orig_map)
+    assert len(nq_example.doc_tokens) == len(orig_to_tokenized_map)
+
+    # query
+    query_tokens = []
+    query_tokens.append("[Q]")
+    query_tokens.extend(tokenize(tokenizer, nq_example.question.split()))
+    if len(query_tokens) > args.max_query_length:
+        query_tokens = query_tokens[-args.max_query_length :]
+
+    # answer
+    # have problems in answer positions!!!
+    answer_tok_start = None
+    answer_tok_end = None
+    if args.train:
+        answer_tok_start = orig_to_tokenized_map[nq_example.answer.start_position - 1]
+        # not sure why
+        answer_tok_end = orig_to_tokenized_map[nq_example.answer.end_position + 1] - 1
+
+    # 512 length documents
+    max_doc_len = args.max_seq_length - len(query_tokens) - 3  # CLS SEP SEP
+
+    DocSpan = collections.namedtuple("DocSpan", "start length")
+
+    # test correct
+    start_offset = 0
+    doc_list = []
+    while start_offset < len(tokenized_doc_tokens):
+        doc_end = min(start_offset + max_doc_len, len(tokenized_doc_tokens))
+        length = doc_end - start_offset
+        doc_list.append(DocSpan(start_offset, length))
+        if doc_end == len(tokenized_doc_tokens):
+            break
+        start_offset += args.doc_stride
+
+    features = []
+
+    for doc_span_idx, doc_span in enumerate(doc_list):
+        # concatenate for each document
+        tokens = []
+        segment_ids = []
+
+        tokens.append("[CLS]")
+        segment_ids.append(0)
+        tokens.extend(query_tokens)
+        segment_ids.extend([0] * len(query_tokens))
+        tokens.append("[SEP]")
+        segment_ids.append(0)
+        doc_span_tokens = tokenized_doc_tokens[
+            doc_span.start : doc_span.start + doc_span.length
+        ]
+        tokens.extend(doc_span_tokens)
+        segment_ids.extend([1] * len(doc_span_tokens))
+        tokens.append("[SEP]")
+        segment_ids.append(1)
+
+        # tested correct
+        token_to_orig_map = {}
+        for i in range(len(tokens) - 1 - (len(query_tokens) + 2)):
+            token_to_orig_map[(len(query_tokens) + 2) + i] = tokenized_to_orig_map[
+                doc_span.start + i
+            ]
+
+        if not doc_span_idx + 1 == len(doc_list):
+            assert len(tokens) == args.max_seq_length
+            assert len(segment_ids) == args.max_seq_length
+
+        input_ids = tokenizer.convert_tokens_to_ids(tokens)
+        input_masks = [1] * len(input_ids)
+
+        padded_input_ids = input_ids + [0] * (args.max_seq_len - len(input_ids))
+        padded_input_masks = input_masks + [0] * (args.max_seq_len - len(input_masks))
+        padded_segment_ids = segment_ids + [0] * (args.max_seq_len - len(segment_ids))
+
+        # determine whether the 512-doc contains answer string
+        start_position = None
+        end_position = None
+        answer_type = None
+        answer_text = ""
+        if args.train:
+            contain_an_answer = (
+                answer_tok_start >= doc_span.start
+                and answer_tok_end <= doc_span.start + doc_span.length
+            )
+            if not contain_an_answer or nq_example.answer.type == AnswerType.UNKNOWN:
+                if not args.include_unknowns:
+                    continue
+                else:
+                    start_position = 0
+                    end_position = 0
+                    answer_type = AnswerType.UNKNOWN
+            else:
+                doc_offset = len(query_tokens) + 2
+                start_position = answer_tok_start - doc_span.start + doc_offset
+                end_position = start_position + (answer_tok_end - answer_tok_start)
+                answer_type = nq_example.answer.type
+
+            answer_text = " ".join(tokens[start_position : end_position + 1])
+
+        feature = InputFeatures(
+            unique_id=nq_example.example_id,
+            example_index=nq_example.q_id,
+            doc_span_index=doc_span_idx,
+            token_to_orig_map=token_to_orig_map,
+            input_ids=padded_input_ids,
+            input_mask=padded_input_masks,
+            segment_ids=padded_segment_ids,
+            start_position=start_position,
+            end_position=end_position,
+            answer_text=answer_text,
+            answer_type=answer_type,
+        )
+
+        features.append(feature)
+
+    return features
+
+
+def tokenize(tokenizer, tokens):
+    # it matches [x*] for any x other than empty space
+    special_char = re.compile(r"^\[[^ ]*\]$", re.UNICODE)
+
+    token_list = []
+    for token in tokens:
+        if special_char.match(token):
+            token_list.append(token)
+        else:
+            token_list.extend(tokenizer.tokenize(token))
+
+    return token_list
+
+
+class InputFeatures:
+    def __init__(
+        self,
+        unique_id,
+        example_index,
+        doc_span_index,
+        token_to_orig_map,
+        input_ids,
+        input_mask,
+        segment_ids,
+        start_position=None,
+        end_position=None,
+        answer_text="",
+        answer_type=None,
+    ):
+        self.unique_id = unique_id
+        self.example_index = example_index
+        self.doc_span_index = doc_span_index
+        self.token_to_orig_map = token_to_orig_map
+        self.input_ids = input_ids
+        self.input_mask = input_mask
+        self.segment_ids = segment_ids
+        self.start_position = start_position
+        self.end_position = end_position
+        self.answer_text = answer_text
+        self.answer_type = answer_type
 
 
 if __name__ == "__main__":
@@ -421,6 +612,12 @@ if __name__ == "__main__":
     parser.add_argument("--max_candidates", type=int, default=50)
     parser.add_argument("--train", type=bool, default=True)
     parser.add_argument("--skip_non_top_level_candidates", type=bool, default=True)
+    parser.add_argument("--apply_basic_tokenization", type=bool, default=False)
+    parser.add_argument("--tokenizer", type=str, default="bert-base-uncased")
+    parser.add_argument("--max_query_length", type=int, default=64)
+    parser.add_argument("--max_seq_length", type=int, default=512)
+    parser.add_argument("--doc_stride", type=int, default=128)
+    parser.add_argument("--include_unknowns", type=bool, default=True)
 
     args = parser.parse_args()
 

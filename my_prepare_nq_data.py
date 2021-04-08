@@ -1,11 +1,14 @@
-import json
-import gzip
-import collections
-import torch
 import argparse
+import collections
 import enum
-from transformers import BertTokenizer
+import gzip
+import json
+import os
+import random
 import re
+
+import torch
+from transformers import BertTokenizer
 
 # get_example
 # for each dictionary extracted:
@@ -24,11 +27,16 @@ import re
 
 
 def get_examples(args):
-    with gzip.GzipFile(args.train_data, "rb") as f:
-        for line in f:
-            data = json.loads(line)
-            example = create_example(args, data)
-            yield example
+    number = 0
+    for each_file in os.listdir(args.train_data):
+        with gzip.GzipFile(args.train_data + "/" + each_file, "rb") as f:
+            for line in f:
+                data = json.loads(line)
+                example = create_example(args, data)
+                number += 1
+                if number % 1000 == 0:
+                    print("{} data points processed".format(number))
+                yield example
 
 
 # tested long, short, yes, unknown
@@ -43,16 +51,20 @@ def create_example(args, data):
         first_token_position = candidate["start_token"]
         first_token = data["document_tokens"][first_token_position]["token"]
         if first_token == "<Table>":
-            counts["Table"] += 1
+            if counts["Table"] < args.max_position:
+                counts["Table"] += 1
             candidate["type_and_position"] = "[Table=%s]" % counts["Table"]
         elif first_token == "<P>":
-            counts["Paragraph"] += 1
+            if counts["Paragraph"] < args.max_position:
+                counts["Paragraph"] += 1
             candidate["type_and_position"] = "[Paragraph=%s]" % counts["Paragraph"]
         elif first_token in ("<Ul>", "<Dl>", "<Ol>"):
-            counts["List"] += 1
+            if counts["List"] < args.max_position:
+                counts["List"] += 1
             candidate["type_and_position"] = "[List=%s]" % counts["List"]
         elif first_token in ("<Tr>", "<Li>", "<Dd>", "<Dt>"):
-            counts["Other"] += 1
+            if counts["Other"] < args.max_position:
+                counts["Other"] += 1
             candidate["type_and_position"] = "[Other=%s]" % counts["Other"]
         else:
             print("Unknown candidate type found: %s", first_token)
@@ -108,8 +120,13 @@ def create_example(args, data):
 
         # find new candidate idx in filtered candidate list
         gold_start_token = annotation["long_answer"]["start_token"]
+        gold_end_token = annotation["long_answer"]["end_token"]
+        candidate_idx = -1
         for idx, cand in enumerate(filtered_candidates_list):
-            if cand["start_token"] == gold_start_token:
+            if (
+                cand["start_token"] == gold_start_token
+                and cand["end_token"] == gold_end_token
+            ):
                 candidate_idx = idx
     else:
         answer["type"] = "unknown"
@@ -121,10 +138,8 @@ def create_example(args, data):
     candidates_text = ["[ContextId=%d] %s" % (-1, "[NoLongAnswer]")]
     offset += len(candidates_text[-1]) + 1
     candidates_map = [-1, -1]
-    candidate_indices = [-1]
     for idx, cand in enumerate(filtered_candidates_list):
         if idx < args.max_candidates - 1:
-            candidate_indices.append(idx)
             # insert the number of candidates
             # the type of candidates
             # and the number this type occurs so far
@@ -157,10 +172,10 @@ def create_example(args, data):
 
     example = {
         "name": data["document_title"],
-        "id": str(data["example_id"]),
+        "id": data["example_id"],
         "question": data["question_text"],
         "answer": answer,
-        "has_correct_candidate": candidate_idx in candidate_indices,
+        "has_correct_candidate": candidate_idx > -1,
         "candidates": candidates_text,
         "candidates_map": candidates_map,
     }
@@ -211,7 +226,7 @@ def get_first_annotation(data):
             start_offset = compute_offset(data, long_start_token, short_start_token)
             end_offset = compute_offset(data, long_start_token, short_end_token)
 
-            return annotation, cand_index, (start_offset, end_offset)
+            return annotation, cand_index, (start_offset, end_offset - 1)
 
         else:
             return annotation, cand_index, (-1, -1)
@@ -276,6 +291,36 @@ def filtered_candidates(args, data):
 # segment_ids, start_position, end_position, answer_text, type
 
 
+class process_example:
+    def __init__(self, args):
+        self.args = args
+        self.tokenizer = BertTokenizer(vocab_file=args.vocab_file, do_lower_case=True)
+
+    def process(self, example):
+        nq_example = return_nq_example(example)
+        input_features = example2feature(self.args, nq_example, self.tokenizer)
+
+        all_features = []
+
+        for input_feature in input_features:
+            features = collections.OrderedDict()
+            features["unique_index"] = input_feature.unique_index
+            features["input_ids"] = input_feature.input_ids
+            features["input_mask"] = input_feature.input_mask
+            features["segment_ids"] = input_feature.segment_ids
+
+            if self.args.train:
+                features["start_position"] = input_feature.start_position
+                features["end_position"] = input_feature.end_position
+                features["answer_type"] = input_feature.answer_type
+            else:
+                features["token_map"] = input_feature.token_to_orig_map
+
+            all_features.append(features)
+
+        return all_features
+
+
 class AnswerType(enum.IntEnum):
     UNKNOWN = 0
     YES = 1
@@ -304,16 +349,6 @@ class NQExample:
         self.answer = answer
         self.start_position = start_position
         self.end_position = end_position
-
-
-class process_example:
-    def __init__(self, args):
-        self.args = args
-        self.tokenizer = BertTokenizer.from_pretrained(args.tokenizer)
-
-    def process(self, example):
-        nq_example = return_nq_example(example)
-        input_feature = example2feature(self.args, nq_example, self.tokenizer)
 
 
 def return_nq_example(example):
@@ -376,7 +411,7 @@ def return_nq_example(example):
 
         # token start position
         start_token_position = char_to_token_offset[start_position]
-        end_token_position = char_to_token_offset[start_position + len(answer_text)]
+        end_token_position = char_to_token_offset[start_position + len(answer_text) - 1]
 
         # check whether the provided answer text is in the actual doc_tokens
         actual_text = " ".join(
@@ -390,11 +425,6 @@ def return_nq_example(example):
                 % (cleaned_answer_text, actual_text)
             )
             return []
-        else:
-            print(
-                "Found answer '%s' in actual text '%s'"
-                % (cleaned_answer_text, actual_text)
-            )
 
     returned_example = NQExample(
         example["id"],
@@ -428,13 +458,16 @@ def return_nq_example(example):
 # modify correspondingly input_ids, input_mask, segment_ids
 def example2feature(args, nq_example, tokenizer):
 
+    # the three tested correct
     tokenized_doc_tokens = []
     orig_to_tokenized_map = []
     tokenized_to_orig_map = []
     for idx, tok in enumerate(nq_example.doc_tokens):
+        # start from 0, the beginning of the tokenized should be the same as the
+        # beginning of words, so 0 position be 0
+        orig_to_tokenized_map.append(len(tokenized_doc_tokens))
         tokens = tokenize(tokenizer, tok.split())
         tokenized_doc_tokens.extend(tokens)
-        orig_to_tokenized_map.append(len(tokenized_doc_tokens))
         # map tokenized to natural numbers, not the actual index of doc_tokens
         tokenized_to_orig_map.extend(len(tokens) * [idx])
 
@@ -455,13 +488,16 @@ def example2feature(args, nq_example, tokenizer):
         query_tokens = query_tokens[-args.max_query_length :]
 
     # answer
-    # have problems in answer positions!!!
     answer_tok_start = None
     answer_tok_end = None
     if args.train:
-        answer_tok_start = orig_to_tokenized_map[nq_example.answer.start_position - 1]
-        # not sure why
-        answer_tok_end = orig_to_tokenized_map[nq_example.answer.end_position + 1] - 1
+        answer_tok_start = orig_to_tokenized_map[nq_example.start_position]
+        # orig_to_tok gives the first tok of the original word
+        # but we need to last tok of the original word
+        if nq_example.end_position + 1 < len(nq_example.doc_tokens):
+            answer_tok_end = orig_to_tokenized_map[nq_example.end_position + 1] - 1
+        else:
+            answer_tok_end = len(tokenized_doc_tokens) - 1
 
     # 512 length documents
     max_doc_len = args.max_seq_length - len(query_tokens) - 3  # CLS SEP SEP
@@ -511,12 +547,17 @@ def example2feature(args, nq_example, tokenizer):
             assert len(tokens) == args.max_seq_length
             assert len(segment_ids) == args.max_seq_length
 
+        # test correct
         input_ids = tokenizer.convert_tokens_to_ids(tokens)
         input_masks = [1] * len(input_ids)
 
-        padded_input_ids = input_ids + [0] * (args.max_seq_len - len(input_ids))
-        padded_input_masks = input_masks + [0] * (args.max_seq_len - len(input_masks))
-        padded_segment_ids = segment_ids + [0] * (args.max_seq_len - len(segment_ids))
+        padded_input_ids = input_ids + [0] * (args.max_seq_length - len(input_ids))
+        padded_input_masks = input_masks + [0] * (
+            args.max_seq_length - len(input_masks)
+        )
+        padded_segment_ids = segment_ids + [0] * (
+            args.max_seq_length - len(segment_ids)
+        )
 
         # determine whether the 512-doc contains answer string
         start_position = None
@@ -526,10 +567,10 @@ def example2feature(args, nq_example, tokenizer):
         if args.train:
             contain_an_answer = (
                 answer_tok_start >= doc_span.start
-                and answer_tok_end <= doc_span.start + doc_span.length
+                and answer_tok_end <= doc_span.start + doc_span.length - 1
             )
             if not contain_an_answer or nq_example.answer.type == AnswerType.UNKNOWN:
-                if not args.include_unknowns:
+                if args.include_unknowns < 0 or random.random() > args.include_unknowns:
                     continue
                 else:
                     start_position = 0
@@ -541,13 +582,14 @@ def example2feature(args, nq_example, tokenizer):
                 end_position = start_position + (answer_tok_end - answer_tok_start)
                 answer_type = nq_example.answer.type
 
-            answer_text = " ".join(tokens[start_position : end_position + 1])
+            # tested correct
+            answer_text = " ".join(tokens[start_position:end_position])
 
         feature = InputFeatures(
-            unique_id=nq_example.example_id,
-            example_index=nq_example.q_id,
+            example_index=nq_example.example_id,
+            unique_index=[nq_example.example_id, doc_span_idx],
             doc_span_index=doc_span_idx,
-            token_to_orig_map=token_to_orig_map,
+            token_to_orig_map=tokenized_to_orig_map,
             input_ids=padded_input_ids,
             input_mask=padded_input_masks,
             segment_ids=padded_segment_ids,
@@ -569,7 +611,10 @@ def tokenize(tokenizer, tokens):
     token_list = []
     for token in tokens:
         if special_char.match(token):
-            token_list.append(token)
+            if token in tokenizer.vocab:
+                token_list.append(token)
+            else:
+                tokens.append(tokenizer.wordpiece_tokenizer.unk_token)
         else:
             token_list.extend(tokenizer.tokenize(token))
 
@@ -579,7 +624,7 @@ def tokenize(tokenizer, tokens):
 class InputFeatures:
     def __init__(
         self,
-        unique_id,
+        unique_index,
         example_index,
         doc_span_index,
         token_to_orig_map,
@@ -591,7 +636,7 @@ class InputFeatures:
         answer_text="",
         answer_type=None,
     ):
-        self.unique_id = unique_id
+        self.unique_index = unique_index
         self.example_index = example_index
         self.doc_span_index = doc_span_index
         self.token_to_orig_map = token_to_orig_map
@@ -606,26 +651,29 @@ class InputFeatures:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--train_data", type=str, default="data/dev/dev")
     parser.add_argument(
-        "--train_data", type=str, default="data/dev/train/nq-train.jsonl.gz"
+        "--out_data", type=str, default="preprocessed_data_dev_dev.json"
     )
     parser.add_argument("--max_candidates", type=int, default=50)
-    parser.add_argument("--train", type=bool, default=True)
+    parser.add_argument("--max_position", type=int, default=50)
+    # the difference between train and dev is whether it contains start/end/answer string
+    parser.add_argument("--train", type=bool, default=False)
     parser.add_argument("--skip_non_top_level_candidates", type=bool, default=True)
     parser.add_argument("--apply_basic_tokenization", type=bool, default=False)
-    parser.add_argument("--tokenizer", type=str, default="bert-base-uncased")
     parser.add_argument("--max_query_length", type=int, default=64)
     parser.add_argument("--max_seq_length", type=int, default=512)
     parser.add_argument("--doc_stride", type=int, default=128)
-    parser.add_argument("--include_unknowns", type=bool, default=True)
+    parser.add_argument("--include_unknowns", type=float, default=0.02)
+    parser.add_argument("--vocab_file", type=str, default="vocab-nq.txt")
 
     args = parser.parse_args()
 
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-
-    processor = process_example(args, tokenizer)
+    processor = process_example(args)
     instances = []
     for example in get_examples(args):
-        e = return_nq_example(example)
-        input_feature = example2feature(e)
-        instances.append(input_feature)
+        all_features = processor.process(example)
+        instances.extend(all_features)
+
+    with open(args.out_data, "w") as f:
+        json.dump(instances, f)

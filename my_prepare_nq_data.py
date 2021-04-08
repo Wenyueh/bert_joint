@@ -314,7 +314,10 @@ class process_example:
                 features["end_position"] = input_feature.end_position
                 features["answer_type"] = input_feature.answer_type
             else:
-                features["token_map"] = input_feature.token_to_orig_map
+                token_map = [-1] * len(input_feature.input_ids)
+                for k, v in input_feature.token_to_orig_map.items():
+                    token_map[k] = v
+                features["token_map"] = token_map
 
             all_features.append(features)
 

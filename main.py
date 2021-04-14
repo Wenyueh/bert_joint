@@ -1,15 +1,24 @@
 import argparse
+import gzip
 import json
+import os
 import sys
 import time
 from collections import OrderedDict
+from os.path import isdir
 
 import torch
+from numpy.lib.function_base import _parse_gufunc_signature
 from torch.utils.data import DataLoader, Dataset
 # transformers version 3.0.2
 from transformers import BertConfig, BertModel, get_linear_schedule_with_warmup
 
+from compute_predictions import (compute_candidate_dict,
+                                 compute_full_token_map_dict,
+                                 compute_predictions)
 from model import Classification
+from nq_eval import (compute_f1, load_gold_labels, load_prediction_labels,
+                     score_predictions)
 
 
 class Logger:
@@ -29,16 +38,16 @@ class Logger:
 
 
 class FeatureData(Dataset):
-    def __init__(self, args, data):
+    def __init__(self, mode, data):
         self.data = data
-        self.args = args
+        self.mode = mode
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        if args.train:
+        if self.mode == "train":
             return (
                 torch.tensor(item["unique_index"]).long(),
                 torch.tensor(item["input_ids"]).long(),
@@ -48,13 +57,13 @@ class FeatureData(Dataset):
                 torch.tensor(item["end_position"]).long(),
                 torch.tensor(item["answer_type"]).long(),
             )
-        elif args.predict:
+        elif self.mode == "evaluation":
             return (
                 torch.tensor(item["unique_index"]).long(),
                 torch.tensor(item["input_ids"]).long(),
                 torch.tensor(item["input_mask"]).long(),
                 torch.tensor(item["segment_ids"]).long(),
-                item["token_map"],
+                torch.tensor(item["token_map"]).long(),
             )
 
 
@@ -153,96 +162,23 @@ def initialize_by_squad_checkpoint(args):
     return model
 
 
-# join examples with features and raw results:
-# id, candidates both give, result and feature
-# id, candidates, result (id, start_logits, end_logits, type_logits), features
-# but I don't really think we need to concatenate with features here
+def load_model(args, predict):
+    config = BertConfig.from_json_file(args.bert_config)
 
-# candidates_dict[example_id] = [long_answer_candidiates]
-def candidate_dict(eval_data_dir):
-    pass
+    encoder = BertModel(config=config)
 
+    model = Classification(args, encoder)
 
-# token_map_dict[example_id] = [token_map]
-def token_map_dict(eval_feature_dir):
-    pass
+    trained_model = torch.load(args.model)
 
+    model.load_state_dict(trained_model)
 
-# find the best_n starts and best_n ends
-# set max_answer_len
-# if end < start, discard
-# if token_map[end] or token_map[start] = -1, discard
-# if end-start+1 > max_len, discard
-# compute the score by adding the logits - cls logits
-# both logits (batch * best_n_size) and predictions (batch * best_n_size)
-# needs to be converted to (best_n_size)
-# the short answer is the highest scored span
-# for each long_answer_candidate in example"
-# if the candidate is top_level and the short span is contained in it
-# the candidate is the long span
-# write a predicted_label dictionary containing:
-# example_id
-# long_answer start & end token
-# long_answer_score
-# short_answer start & end token
-# short answer score
-# yes_no_answer: None
-def compute_predictions(args, candidates, token_map, logits, predictions):
-    max_answer_len = args.max_answer_len  # 30
-    start_logits = predictions["start_positions"][0].tolist()  # batch * best_n_size
-    start_positions = predictions["start_positions"][1].tolist()  # batch * best_n_size
-    end_logits = predictions["end_positions"][0].tolist()  # batch * best_n_size
-    end_positions = predictions["end_positions"][1].tolist()  # batch * best_n_size
+    model.cuda()
 
-    predictions = []
+    if predict:
+        model.eval()
 
-    for start_i, start_position in enumerate(start_positions):
-        for end_i, end_position in enumerate(end_positions):
-            if end_position < start_position:
-                continue
-            if end_position - start_position + 1 > max_answer_len:
-                continue
-            if token_map[start_position] == -1:
-                continue
-            if token_map[end_position] == -1:
-                continue
-            short_span_score = start_logits[start_i] + end_logits[end_i]
-            cls_score = logits["start_logits"][0] + logits["end_logits"][1]
-            score = short_span_score - cls_score
-            span = (token_map[start_position], token_map[end_position] + 1)
-
-            answer_type = predictions["type_predictions"]
-
-            predictions.append((score, span, answer_type))
-
-
-# compute candidate_dict: id:candidates
-# based on id, concatenate corresponding candidate list with predictions
-# compute predictions with the corresponding id
-# collect them and write them to json file
-def compute_pred_dict(args, raw_results):
-    candidate_dict = candidate_dict(args.eval_dir)
-
-    # load features from json file
-    token_map_dict = token_map_dict(args.eval_feature_dir)
-
-    # based on raw results with ids and candidate dict
-    candidate_prediction_pairs = None
-
-    summary_list = []
-
-    for candidate_prediction_pair in candidate_prediction_pairs:
-        id = None
-        candidates = candidate_dict[id]
-        token_map = token_map_dict[id]
-        logits = raw_results[id]["logits"]
-        predictions = raw_results[id]["predictions"]
-
-        summary = compute_predictions(args, candidates, token_map, logits, predictions)
-        summary_list.append(summary)
-
-    with open(args.eval_result_dir, "w") as f:
-        json.load(f, summary_list)
+    return model
 
 
 if __name__ == "__main__":
@@ -260,66 +196,181 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="best_model.pt",
-        help="location where the trained model will be saved",
+        help="location where the trained model will be saved or loaded",
     )
     parser.add_argument("--bert_config", type=str, default="bert_config.json")
     parser.add_argument("--train", type=bool, default=True)
     # training related
-    parser.add_argument("--batch_size", type=int, default=4)
+    parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--epoch", type=int, default=100)
     parser.add_argument("--warm_up_proportion", type=float, default=0.1)
     parser.add_argument("--accumulate_gradient_steps", type=int, default=8)
     parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--clip", type=float, default=1)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
+    parser.add_argument("--save_checkpoint_steps", type=int, default=500)
+    # eval
+    parser.add_argument("--evaluation", type=bool, default=True)
+    parser.add_argument("--eval_batch_size", type=int, default=1)
+    parser.add_argument("--best_n_size", type=int, default=10)
+    parser.add_argument("--max_answer_length", type=int, default=30)
+    parser.add_argument("--eval_data_dir", type=str, default="data/dev/dev")
+    parser.add_argument(
+        "--eval_feature_dir", type=str, default="preprocessed_data_dev_dev.json"
+    )
+    parser.add_argument(
+        "--eval_result_dir", type=str, default="eval_prediction_result.json"
+    )
+    parser.add_argument("--gold_data_dir", type=str, default="data/dev/dev")
+    parser.add_argument("--long_non_null_answer_threshold", type=int, default=2)
+    parser.add_argument("--short_non_null_answer_threshold", type=int, default=2)
     # logging
     parser.add_argument("--log_path", type=str, default="dev.log")
     parser.add_argument("--logging_step", type=int, default=10)
-    # eval
-    parser.add_argument("--eval_mode", type=bool, default=False)
-    parser.add_argument("--best_n_size", type=int, default=20)
-    parser.add_argument("--max_answer_length", type=int, default=30)
-    parser.add_argument("--eval_dir", type=str, default="data/dev/dev")
+    parser.add_argument("--eval_logging_steps", type=int, default=1000)
+
+    parser.add_argument("--gpu", type=str, default="1")
 
     args = parser.parse_args()
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
     logger = Logger(args.log_path)
     logger.log(str(args))
 
-    with open(args.data_dir, "r") as f:
-        data = json.load(f)
+    if args.train:
 
-    # initialize the model by squad
-    model = initialize_by_squad_checkpoint(args)
+        with open(args.data_dir, "r") as f:
+            data = json.load(f)
 
-    # load data
-    FeatureData = FeatureData(args, data)
-    train_loader = DataLoader(FeatureData, batch_size=args.batch_size, shuffle=True)
+        # initialize the model by squad
+        logger.log("Loading SQuAD pretrained model...")
+        model = initialize_by_squad_checkpoint(args)
+        logger.log("Finished loading SQuAD pretrained model.")
 
-    # optimizer & scheduler
-    num_train_examples = len(FeatureData)
-    optimizer, scheduler = construct_optimizer(args, model, num_train_examples)
+        # load data
+        TrainFeatureData = FeatureData("train", data)
+        train_loader = DataLoader(
+            TrainFeatureData, batch_size=args.batch_size, shuffle=True
+        )
 
-    num_steps = 0
-    used_time = 0
-    for epoch in range(args.epoch):
-        one_epoch_start_time = time.time()
-        for i, data in enumerate(train_loader):
-            start_time = time.time()
+        # optimizer & scheduler
+        num_train_examples = len(TrainFeatureData)
+        optimizer, scheduler = construct_optimizer(args, model, num_train_examples)
 
-            loss_value = 0
+        # train on training dataset
+        num_steps = 0
+        used_time = 0
+        for epoch in range(args.epoch):
+            one_epoch_start_time = time.time()
+            for i, data in enumerate(train_loader):
+                start_time = time.time()
 
+                loss_value = 0
+
+                # input to the model
+                unique_index = data[0].cuda()
+                input_ids = data[1].cuda()
+                input_mask = data[2].cuda()
+                segment_ids = data[3].cuda()
+                start_positions = data[4].cuda()
+                end_positions = data[5].cuda()
+                types = data[6].cuda()
+
+                model.train()
+
+                loss, logits, predictions, _ = model(
+                    unique_index=unique_index,
+                    input_ids=input_ids,
+                    input_mask=input_mask,
+                    segment_ids=segment_ids,
+                    start_positions=start_positions,
+                    end_positions=end_positions,
+                    types=types,
+                )
+
+                loss.backward()
+
+                loss_value += loss.item()
+
+                # update the model
+                if (i + 1) % args.accumulate_gradient_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+                    optimizer.step()
+                    scheduler.step()
+                    model.zero_grad()
+                    num_steps += 1
+
+                    torch.cuda.synchronize()
+                    end_time = time.time()
+                    used_time += end_time - start_time
+
+                    if num_steps % args.logging_step == 0:
+                        logger.log(
+                            "From step {} to step {}, which is epoch {} batch {}, the total time used is {}, the averaged loss value is {}".format(
+                                num_steps - args.logging_step,
+                                num_steps,
+                                epoch,
+                                i,
+                                used_time,
+                                loss_value / args.logging_step,
+                            )
+                        )
+                        used_time = 0
+                        loss_value = 0
+
+                    # the model does not evaluate the training dataset
+                    # save checkpoint every xxx steps
+                    # since the model does not evaluate on training,
+                    # it not necessarily save the best model
+                    if num_steps != 0 and num_steps % args.save_checkpoint_steps == 0:
+                        torch.save(model.state_dict(), args.model)
+                        logger.log("Save model at step {}".format(num_steps))
+
+    # do prediction on dev dataset and evaluation here
+    if args.evaluation:
+
+        logger.log("Loading preprocessed development data set...")
+
+        with open(args.eval_feature_dir, "r") as f:
+            data = json.load(f)
+
+        # load evaluation data
+        EvalFeatureData = FeatureData("evaluation", data)
+        eval_loader = DataLoader(
+            EvalFeatureData, batch_size=args.eval_batch_size, shuffle=False
+        )
+
+        # loading them in order to compute prediction spans
+        logger.log(
+            "Loading unique_index: candidate_list from {}...".format(args.eval_data_dir)
+        )
+        candidate_dict = compute_candidate_dict(args.eval_data_dir)
+
+        logger.log(
+            "Loading unique_index: token_map from {}...".format(args.eval_feature_dir)
+        )
+        token_map_dict = compute_full_token_map_dict(args.eval_feature_dir)
+
+        # load trained model
+        logger.log("Loading trained model for evaluation...")
+        model = load_model(args, args.evaluation)
+        logger.log("Finished loading trained model for evaluation.")
+
+        summary_list = []
+        start = True
+        for batch_num, batch in enumerate(eval_loader):
             # input to the model
-            input_ids = data[1].cuda()
-            input_mask = data[2].cuda()
-            segment_ids = data[3].cuda()
-            start_positions = data[4].cuda()
-            end_positions = data[5].cuda()
-            types = data[6].cuda()
+            unique_index = batch[0].cuda()
+            input_ids = batch[1].cuda()
+            input_mask = batch[2].cuda()
+            segment_ids = batch[3].cuda()
+            start_positions = None
+            end_positions = None
+            types = None
 
-            model.train()
-
-            loss, logits, predictions = model(
+            _, logits, predictions, unique_index = model(
+                unique_index=unique_index,
                 input_ids=input_ids,
                 input_mask=input_mask,
                 segment_ids=segment_ids,
@@ -328,32 +379,82 @@ if __name__ == "__main__":
                 types=types,
             )
 
-            loss.backward()
+            for i in range(unique_index.size(0)):
+                one_prediction = {
+                    "start_predictions": torch.cat(
+                        (
+                            predictions["start_predictions"][0][i].unsqueeze(0),
+                            predictions["start_predictions"][1][i].unsqueeze(0),
+                        ),
+                        dim=0,
+                    ).tolist(),
+                    "end_predictions": torch.cat(
+                        (
+                            predictions["end_predictions"][0][i].unsqueeze(0),
+                            predictions["end_predictions"][1][i].unsqueeze(0),
+                        ),
+                        dim=0,
+                    ).tolist(),
+                    "type_predictions": predictions["type_predictions"][i].tolist(),
+                }
+                one_logit = {
+                    "start_logits": logits["start_logits"][i].tolist(),
+                    "end_logits": logits["end_logits"][i].tolist(),
+                    "type_logits": logits["type_logits"][i].tolist(),
+                }
 
-            loss_value += loss.item()
+                # compile the prediction result
+                # find corresponding long_answer_candidates
+                orig_id = unique_index[i].tolist()[0]
+                for k, one_candidates in candidate_dict.items():
+                    if k == orig_id:
+                        candidates = one_candidates
 
-            # update the model
-            if (i + 1) % args.accumulate_gradient_steps == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-                optimizer.step()
-                scheduler.step()
-                model.zero_grad()
-                num_steps += 1
+                # find corresponding token_map
+                full_id = unique_index[i].tolist()
+                for k, one_token_map in token_map_dict.items():
+                    if k == tuple(full_id):
+                        token_map = one_token_map
 
-                torch.cuda.synchronize()
-                end_time = time.time()
-                used_time += end_time - start_time
+                summary = compute_predictions(
+                    args, orig_id, candidates, token_map, one_logit, one_prediction
+                )
 
-                if num_steps % args.logging_step == 0:
-                    logger.log(
-                        "From step {} to step {}, which is epoch {} batch {}, the total time used is {}, the averaged loss value is {}".format(
-                            num_steps - args.logging_step,
-                            num_steps,
-                            epoch,
-                            i,
-                            used_time,
-                            loss_value / args.logging_step,
-                        )
+                # at most one answer for each 512 input_ids
+                # could be multiple answers for each example_id
+                summary_list.append(summary)
+
+            if batch_num != 0 and batch_num % args.eval_logging_steps == 0:
+                logger.log(
+                    "Running model on development data set for {} batches.".format(
+                        batch_num
                     )
-                    used_time = 0
-                    loss_value = 0
+                )
+
+        with open(args.eval_result_dir, "w") as f:
+            json.dump(summary_list, f)
+
+        gold_label = load_gold_labels(args)
+        # load prediction data and transform to nq_lable structure
+        # id: nq_label
+        pred_label = load_prediction_labels(args)
+
+        long_answer_stats, short_answer_stats = score_predictions(
+            args, gold_label, pred_label
+        )
+
+        (
+            long_precision,
+            long_recall,
+            long_f1,
+            short_precision,
+            short_recall,
+            short_f1,
+        ) = compute_f1(long_answer_stats, short_answer_stats)
+
+        logger.log("Long answer precision is: {}".format(long_precision))
+        logger.log("Long answer recall is: {}".format(long_recall))
+        logger.log("Long answer f1 is: {}".format(long_f1))
+        logger.log("Short answer precision is: {}".format(short_precision))
+        logger.log("Short answer recall is: {}".format(short_recall))
+        logger.log("Short answer f1 is: {}".format(short_f1))

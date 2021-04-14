@@ -53,8 +53,16 @@ class Classification(nn.Module):
         self.type_weights.bias.data.zero_()
 
     def forward(
-        self, input_ids, input_mask, segment_ids, start_positions, end_positions, types
+        self,
+        unique_index,
+        input_ids,
+        input_mask,
+        segment_ids,
+        start_positions,
+        end_positions,
+        types,
     ):
+
         sequence_hidden = self.encoder(input_ids, input_mask, segment_ids)[
             0
         ]  # B, seq_len, hidden_size
@@ -65,6 +73,11 @@ class Classification(nn.Module):
         start_logits = self.start_weights(sequence_hidden).squeeze()  # B, seq_len
         end_logits = self.end_weights(sequence_hidden).squeeze()  # B, seq_len
         type_logits = self.type_weights(cls_hidden)  # B, 5
+
+        if len(start_logits.size()) == 1:
+            start_logits = start_logits.unsqueeze(0)
+            end_logits = end_logits.unsqueeze(0)
+            type_logits = type_logits.unsqueeze(0)
         logits = {
             "start_logits": start_logits,
             "end_logits": end_logits,
@@ -72,6 +85,7 @@ class Classification(nn.Module):
         }
 
         # if train, compute loss
+        loss = None
         if (
             torch.is_tensor(start_positions)
             and torch.is_tensor(end_positions)
@@ -84,8 +98,11 @@ class Classification(nn.Module):
 
         # compute prediction
         # return best 20 positions, sorted from high to low based on logits
-        start_predictions = torch.topk(start_logits, self.args.best_n_size, dim=1)
-        end_predictions = torch.topk(end_logits, self.args.best_n_size, dim=1)
+        # tested right
+        start_predictions = torch.topk(
+            start_logits[:, 1:], self.args.best_n_size, dim=1
+        )
+        end_predictions = torch.topk(end_logits[:, 1:], self.args.best_n_size, dim=1)
         type_predictions = torch.argmax(type_logits, dim=1)
 
         predictions = {
@@ -94,4 +111,4 @@ class Classification(nn.Module):
             "type_predictions": type_predictions,
         }
 
-        return (loss, logits, predictions)
+        return (loss, logits, predictions, unique_index)

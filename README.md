@@ -6,13 +6,31 @@ transformers 3.0.2
 pytorch 1.7.0
 
 # files
-data preprocessing: my_prepare_nq_data.py
+data preprocessing: prepare_nq_data.py
 
 modeling and computing loss: model.py
 
 initialization by pretrained SQuAD model: https://www.dropbox.com/s/8jnulb2l4v7ikir/model.zip
 
-initialization and training process: main.py
+initialization, training process, prediction process, evaluation process: main.py
 
-prediction computation and evaluation file yet to be updated
+compute predictions: compute_predictions.py
 
+evaluate precision, recall, F1 on predicted long answers and short answers: nq_eval.py
+
+# run bert joint
+python main.py
+
+--data_dir (preprocessed training data directory)
+
+--squad_model (BERT checkpoint trained on SQuAD 2.0)
+
+--model (the directory to save/load the trained model)
+
+--eval_data_dir (the original data for evaluation, non-preprocessed)
+
+--eval_feature_dir (the preprocessed evaluation data directory)
+
+--eval_result_dir (the directory to save predictions of the model on eval dataset)
+
+--log_path (the directory to save the log file)

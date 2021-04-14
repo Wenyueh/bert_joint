@@ -12,7 +12,9 @@ modeling and computing loss: model.py
 
 initialization by pretrained SQuAD model: https://www.dropbox.com/s/8jnulb2l4v7ikir/model.zip
 
-initialization and training process: main.py
+initialization, training process, prediction process, evaluation process: main.py
 
-prediction computation and evaluation file yet to be updated
+compute predictions: compute_predictions.py
+
+evaluate precision, recall, F1 on predicted long answers and short answers: nq_eval.py
 

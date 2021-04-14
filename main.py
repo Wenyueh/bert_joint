@@ -90,7 +90,7 @@ def construct_optimizer(args, model, num_train_examples):
     # Implements linear decay of the learning rate.
     # default to be AdamW based on tensorflow, AdamWeightDecayOptimizer
     # parameters are using default
-    optimizer = torch.optim.AdamW(optimized_parameters, lr=args.learning_rate)
+    optimizer = torch.optim.Adam(optimized_parameters, lr=args.learning_rate)
 
     num_training_steps = int(
         args.epoch
@@ -184,7 +184,10 @@ def load_model(args, predict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--data_dir", type=str, default="preprocessed_data_dev_train.json"
+        "--data_dir",
+        type=str,
+        default="preprocessed_data_dev_train.json",
+        help="preprocessed training data directory",
     )
     parser.add_argument(
         "--squad_model",
@@ -204,7 +207,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--epoch", type=int, default=100)
     parser.add_argument("--warm_up_proportion", type=float, default=0.1)
-    parser.add_argument("--accumulate_gradient_steps", type=int, default=8)
+    parser.add_argument("--accumulate_gradient_steps", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--clip", type=float, default=1)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
@@ -214,14 +217,24 @@ if __name__ == "__main__":
     parser.add_argument("--eval_batch_size", type=int, default=1)
     parser.add_argument("--best_n_size", type=int, default=10)
     parser.add_argument("--max_answer_length", type=int, default=30)
-    parser.add_argument("--eval_data_dir", type=str, default="data/dev/dev")
     parser.add_argument(
-        "--eval_feature_dir", type=str, default="preprocessed_data_dev_dev.json"
+        "--eval_data_dir",
+        type=str,
+        default="data/dev/dev",
+        help="the original data for evaluation, non-preprocessed",
     )
     parser.add_argument(
-        "--eval_result_dir", type=str, default="eval_prediction_result.json"
+        "--eval_feature_dir",
+        type=str,
+        default="preprocessed_data_dev_dev.json",
+        help="the preprocessed evaluation data directory",
     )
-    parser.add_argument("--gold_data_dir", type=str, default="data/dev/dev")
+    parser.add_argument(
+        "--eval_result_dir",
+        type=str,
+        default="eval_prediction_result.json",
+        help="the directory to save predictions of the model on eval dataset",
+    )
     parser.add_argument("--long_non_null_answer_threshold", type=int, default=2)
     parser.add_argument("--short_non_null_answer_threshold", type=int, default=2)
     # logging
@@ -434,6 +447,7 @@ if __name__ == "__main__":
         with open(args.eval_result_dir, "w") as f:
             json.dump(summary_list, f)
 
+        # compute evaluation on long answers and short answers
         gold_label = load_gold_labels(args)
         # load prediction data and transform to nq_lable structure
         # id: nq_label

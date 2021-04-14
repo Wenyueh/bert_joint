@@ -6,7 +6,7 @@ transformers 3.0.2
 pytorch 1.7.0
 
 # files
-data preprocessing: my_prepare_nq_data.py
+data preprocessing: prepare_nq_data.py
 
 modeling and computing loss: model.py
 

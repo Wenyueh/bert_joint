@@ -20,7 +20,6 @@ evaluate precision, recall, F1 on predicted long answers and short answers: nq_e
 
 # run bert joint
 python main.py
-
 --data_dir (preprocessed training data directory)
 
 --squad_model (BERT checkpoint trained on SQuAD 2.0)

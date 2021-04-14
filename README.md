@@ -19,4 +19,18 @@ compute predictions: compute_predictions.py
 evaluate precision, recall, F1 on predicted long answers and short answers: nq_eval.py
 
 # run bert joint
-python main.py 
+python main.py
+
+--data_dir (preprocessed training data directory)
+
+--squad_model (BERT checkpoint trained on SQuAD 2.0)
+
+--model (the directory to save/load the trained model)
+
+--eval_data_dir (the original data for evaluation, non-preprocessed)
+
+--eval_feature_dir (the preprocessed evaluation data directory)
+
+--eval_result_dir (the directory to save predictions of the model on eval dataset)
+
+--log_path (the directory to save the log file)

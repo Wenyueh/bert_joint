@@ -18,3 +18,5 @@ compute predictions: compute_predictions.py
 
 evaluate precision, recall, F1 on predicted long answers and short answers: nq_eval.py
 
+# run bert joint
+python main.py 

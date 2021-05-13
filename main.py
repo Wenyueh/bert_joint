@@ -8,6 +8,7 @@ from collections import OrderedDict
 from os.path import isdir
 
 import torch
+import torch.nn as nn
 from numpy.lib.function_base import _parse_gufunc_signature
 from torch.utils.data import DataLoader, Dataset
 # transformers version 3.0.2
@@ -19,6 +20,13 @@ from compute_predictions import (compute_candidate_dict,
 from model import Classification
 from nq_eval import (compute_f1, load_gold_labels, load_prediction_labels,
                      score_predictions)
+
+
+def set_seed(args):
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed(args.seed)
+    torch.backends.cudnn.enabled = False
+    torch.backends.cudnn.deterministic = True
 
 
 class Logger:
@@ -157,6 +165,9 @@ def initialize_by_squad_checkpoint(args):
 
     model = Classification(args, encoder)
 
+    if args.dp:
+        model = nn.DataParallel(model)
+
     model.cuda()
 
     return model
@@ -169,31 +180,40 @@ def load_model(args, predict):
 
     model = Classification(args, encoder)
 
+    if args.dp:
+        model = nn.DataParallel(model)
+
     trained_model = torch.load(args.model)
 
-    model.load_state_dict(trained_model)
+    modified_trained_model = OrderedDict()
+    for k, v in trained_model.items():
+        if k[:4] == "bert":
+            newk = k.replace("bert", "encoder")
+            modified_trained_model[newk] = v
+        else:
+            modified_trained_model[k] = v
+
+    model.load_state_dict(modified_trained_model, strict=False)
 
     model.cuda()
 
     if predict:
         model.eval()
+    else:
+        model.train()
 
     return model
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=42, help="fix random seed")
+    parser.add_argument("--bert_type", type=str, default="bert_base_uncased")
     parser.add_argument(
         "--data_dir",
         type=str,
-        default="preprocessed_data_dev_train.json",
+        default="preprocessed_data_full_train.json",
         help="preprocessed training data directory",
-    )
-    parser.add_argument(
-        "--squad_model",
-        type=str,
-        default="squad_model/pytorch_model.bin",
-        help="The bert model is pretrained on SQuAD 2.0. Initialize the Bert Model by squad_pretrained_model",
     )
     parser.add_argument(
         "--model",
@@ -201,71 +221,91 @@ if __name__ == "__main__":
         default="best_model.pt",
         help="location where the trained model will be saved or loaded",
     )
-    parser.add_argument("--bert_config", type=str, default="bert_config.json")
+    parser.add_argument("--continue_training", type=bool, default=False)
     parser.add_argument("--train", type=bool, default=True)
     # training related
-    parser.add_argument("--batch_size", type=int, default=2)
-    parser.add_argument("--epoch", type=int, default=100)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--epoch", type=int, default=1)
     parser.add_argument("--warm_up_proportion", type=float, default=0.1)
-    parser.add_argument("--accumulate_gradient_steps", type=int, default=4)
+    # actual batch_size 32
+    parser.add_argument("--accumulate_gradient_steps", type=int, default=2)
     parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--clip", type=float, default=1)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
-    parser.add_argument("--save_checkpoint_steps", type=int, default=500)
+    parser.add_argument("--save_checkpoint_steps", type=int, default=1000)
     # eval
     parser.add_argument("--evaluation", type=bool, default=True)
-    parser.add_argument("--eval_batch_size", type=int, default=1)
+    parser.add_argument("--eval_batch_size", type=int, default=4)
     parser.add_argument("--best_n_size", type=int, default=10)
     parser.add_argument("--max_answer_length", type=int, default=30)
     parser.add_argument(
         "--eval_data_dir",
         type=str,
-        default="data/dev/dev",
+        default="data/full/dev",
         help="the original data for evaluation, non-preprocessed",
     )
     parser.add_argument(
         "--eval_feature_dir",
         type=str,
-        default="preprocessed_data_dev_dev.json",
+        default="preprocessed_data_full_dev.json",
         help="the preprocessed evaluation data directory",
     )
     parser.add_argument(
         "--eval_result_dir",
         type=str,
-        default="eval_prediction_result.json",
+        default="prediction_result.json",
         help="the directory to save predictions of the model on eval dataset",
     )
     parser.add_argument("--long_non_null_answer_threshold", type=int, default=2)
     parser.add_argument("--short_non_null_answer_threshold", type=int, default=2)
     # logging
     parser.add_argument("--log_path", type=str, default="dev.log")
-    parser.add_argument("--logging_step", type=int, default=10)
+    parser.add_argument("--logging_step", type=int, default=100)
     parser.add_argument("--eval_logging_steps", type=int, default=1000)
 
-    parser.add_argument("--gpu", type=str, default="1")
+    parser.add_argument("--gpu", type=str, default="1,2")
 
     args = parser.parse_args()
+
+    if args.bert_type == "bert_base_uncased":
+        args.bert_config = "bert_base_config.json"
+        args.squad_model = "squad_bert_base"
+    if args.bert_type == "bert_large_uncased":
+        args.bert_config = "bert_large_config.json"
+        args.squad_model = "squad_bert_large/pytorch_model.bin"
+
+    set_seed(args)
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
     logger = Logger(args.log_path)
     logger.log(str(args))
 
+    # data parallel
+    args.dp = torch.cuda.device_count() > 1
+
     if args.train:
 
         with open(args.data_dir, "r") as f:
             data = json.load(f)
-
-        # initialize the model by squad
-        logger.log("Loading SQuAD pretrained model...")
-        model = initialize_by_squad_checkpoint(args)
-        logger.log("Finished loading SQuAD pretrained model.")
+            # just in case there's only one data point and not as a one-element list
+            if isinstance(data, dict):
+                data = [data]
 
         # load data
         TrainFeatureData = FeatureData("train", data)
         train_loader = DataLoader(
             TrainFeatureData, batch_size=args.batch_size, shuffle=True
         )
+
+        if args.continue_training:
+            # loading trained model, keep training
+            model = load_model(args, False)
+        else:
+            # initialize the model by squad
+            logger.log("Loading SQuAD pretrained model...")
+            model = initialize_by_squad_checkpoint(args)
+            logger.log("Finished loading SQuAD pretrained model.")
 
         # optimizer & scheduler
         num_train_examples = len(TrainFeatureData)
@@ -274,12 +314,12 @@ if __name__ == "__main__":
         # train on training dataset
         num_steps = 0
         used_time = 0
+        model.zero_grad()
         for epoch in range(args.epoch):
+            loss_value = 0
             one_epoch_start_time = time.time()
             for i, data in enumerate(train_loader):
                 start_time = time.time()
-
-                loss_value = 0
 
                 # input to the model
                 unique_index = data[0].cuda()
@@ -290,8 +330,6 @@ if __name__ == "__main__":
                 end_positions = data[5].cuda()
                 types = data[6].cuda()
 
-                model.train()
-
                 loss, logits, predictions, _ = model(
                     unique_index=unique_index,
                     input_ids=input_ids,
@@ -301,6 +339,9 @@ if __name__ == "__main__":
                     end_positions=end_positions,
                     types=types,
                 )
+
+                if args.dp:
+                    loss = loss.mean()
 
                 loss.backward()
 
@@ -340,6 +381,9 @@ if __name__ == "__main__":
                         torch.save(model.state_dict(), args.model)
                         logger.log("Save model at step {}".format(num_steps))
 
+        torch.save(model.state_dict(), args.model)
+        logger.log("Save model at step {}".format(num_steps))
+
     # do prediction on dev dataset and evaluation here
     if args.evaluation:
 
@@ -347,6 +391,9 @@ if __name__ == "__main__":
 
         with open(args.eval_feature_dir, "r") as f:
             data = json.load(f)
+            # if data is only one datapoint not in the form of a list of len 1
+            if isinstance(data, dict):
+                data = [data]
 
         # load evaluation data
         EvalFeatureData = FeatureData("evaluation", data)
@@ -397,14 +444,14 @@ if __name__ == "__main__":
                     "start_predictions": torch.cat(
                         (
                             predictions["start_predictions"][0][i].unsqueeze(0),
-                            predictions["start_predictions"][1][i].unsqueeze(0),
+                            predictions["start_predictions"][1][i].unsqueeze(0) + 1,
                         ),
                         dim=0,
                     ).tolist(),
                     "end_predictions": torch.cat(
                         (
                             predictions["end_predictions"][0][i].unsqueeze(0),
-                            predictions["end_predictions"][1][i].unsqueeze(0),
+                            predictions["end_predictions"][1][i].unsqueeze(0) + 1,
                         ),
                         dim=0,
                     ).tolist(),

@@ -39,8 +39,8 @@ NQLabel = collections.namedtuple(
 
 def load_gold_labels(args):
     gold_dict = {}
-    for each_file in os.listdir(args.gold_data_dir):
-        with gzip.GzipFile(args.gold_data_dir + "/" + each_file, "rb") as f:
+    for each_file in os.listdir(args.eval_data_dir):
+        with gzip.GzipFile(args.eval_data_dir + "/" + each_file, "rb") as f:
             for line in f:
                 data = json.loads(line)
 
@@ -49,10 +49,10 @@ def load_gold_labels(args):
                 annotation_list = []
 
                 for annotation in data["annotations"]:
-                    long_answer = (
+                    long_answer = [
                         annotation["long_answer"]["start_token"],
                         annotation["long_answer"]["end_token"],
-                    )
+                    ]
                     short_answer_list = []
                     for short_answer in annotation["short_answers"]:
                         short_answer_list.append(
@@ -139,7 +139,7 @@ def score_long_answer(args, gold_list, pred_list):
     )
     pred_has_answer = not is_null_span(pred_list.long_answer_span)
 
-    score = pred_list.long_answer_score
+    score = pred_list.long_score
 
     is_correct = False
 
@@ -194,6 +194,8 @@ def score_short_answer(args, gold_list, pred_list):
         pred_short_answer = pred_list.short_answer_span_list
         for one_gold_list in gold_list:
             if one_gold_list.short_answer_span_list == pred_short_answer:
+                print(one_gold_list.short_answer_span_list)
+                print(pred_list)
                 is_correct = True
                 break
 
@@ -260,4 +262,11 @@ def compute_f1(long_answer_stats, short_answer_stats):
             2 * (short_precision * short_recall) / (short_precision + short_recall)
         )
 
-    return long_precision, long_recall, long_f1, short_precision, short_recall, short_f1
+    return (
+        long_precision * 100,
+        long_recall * 100,
+        long_f1 * 100,
+        short_precision * 100,
+        short_recall * 100,
+        short_f1 * 100,
+    )

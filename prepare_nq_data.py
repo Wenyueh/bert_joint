@@ -592,7 +592,7 @@ def example2feature(args, nq_example, tokenizer):
             example_index=nq_example.example_id,
             unique_index=[nq_example.example_id, doc_span_idx],
             doc_span_index=doc_span_idx,
-            token_to_orig_map=tokenized_to_orig_map,
+            token_to_orig_map=token_to_orig_map,
             input_ids=padded_input_ids,
             input_mask=padded_input_masks,
             segment_ids=padded_segment_ids,
@@ -654,14 +654,16 @@ class InputFeatures:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_data", type=str, default="data/dev/dev")
+    parser.add_argument("--train_data", type=str, default="data/full/train")
     parser.add_argument(
-        "--out_data", type=str, default="preprocessed_data_dev_dev.json"
+        "--out_data", type=str, default="preprocessed_data_full_train.json"
     )
-    parser.add_argument("--max_candidates", type=int, default=50)
+    parser.add_argument("--max_candidates", type=int, default=48)
     parser.add_argument("--max_position", type=int, default=50)
-    # the difference between train and dev is whether it contains start/end/answer string
-    parser.add_argument("--train", type=bool, default=False)
+    # the difference between train and dev is:
+    # training file contains start/end/answer string
+    # eval file contains token map
+    parser.add_argument("--train", type=bool, default=True)
     parser.add_argument("--skip_non_top_level_candidates", type=bool, default=True)
     parser.add_argument("--apply_basic_tokenization", type=bool, default=False)
     parser.add_argument("--max_query_length", type=int, default=64)
@@ -671,6 +673,8 @@ if __name__ == "__main__":
     parser.add_argument("--vocab_file", type=str, default="vocab-nq.txt")
 
     args = parser.parse_args()
+
+    random.seed(42)
 
     processor = process_example(args)
     instances = []

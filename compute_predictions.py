@@ -69,6 +69,8 @@ def compute_full_token_map_dict(eval_feature_dir):
     token_map_dict = {}
     with open(eval_feature_dir, "r") as f:
         data_points = json.load(f)
+        if isinstance(data_points, dict):
+            data_points = [data_points]
     for data in data_points:
         unique_index = tuple(data["unique_index"])  # list type is unhashable
         token_map = data["token_map"]

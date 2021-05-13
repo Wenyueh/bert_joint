@@ -10,7 +10,9 @@ data preprocessing: prepare_nq_data.py
 
 modeling and computing loss: model.py
 
-initialization by pretrained SQuAD model: https://www.dropbox.com/s/8jnulb2l4v7ikir/model.zip
+initialization by bert_large pretrained SQuAD model: https://www.dropbox.com/s/8jnulb2l4v7ikir/model.zip
+
+initialization by bert_base pretrained SQuAD model: https://huggingface.co/twmkn9/bert-base-uncased-squad2/tree/main
 
 initialization, training process, prediction process, evaluation process: main.py
 
@@ -22,6 +24,8 @@ evaluate precision, recall, F1 on predicted long answers and short answers: nq_e
 python main.py
 
 --data_dir (preprocessed training data directory)
+
+--bert_type (bert_base_uncased; bert_large_uncased)
 
 --squad_model (BERT checkpoint trained on SQuAD 2.0)
 

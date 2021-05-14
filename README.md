@@ -31,6 +31,12 @@ python main.py
 
 --model (the directory to save/load the trained model)
 
+--train (whether the train the model)
+
+--eval (whether to evaluate the model; it could be the case that both --train and --eval are true)
+
+--continue_training (whether to load a trained checkpoint and keep training the model)
+
 --eval_data_dir (the original data for evaluation, non-preprocessed)
 
 --eval_feature_dir (the preprocessed evaluation data directory)

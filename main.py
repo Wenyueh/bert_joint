@@ -18,8 +18,9 @@ from compute_predictions import (compute_candidate_dict,
                                  compute_full_token_map_dict,
                                  compute_predictions)
 from model import Classification
-from nq_eval import (compute_f1, load_gold_labels, load_prediction_labels,
-                     score_predictions)
+from my_prepare_nq_data import FeatureData
+from nq_eval import (compute_best_f1, compute_plain_f1, load_gold_labels,
+                     load_prediction_labels, score_predictions)
 
 
 def set_seed(args):
@@ -43,36 +44,6 @@ class Logger:
         if newline:
             sys.stdout.write("\n")
         sys.stdout.flush()
-
-
-class FeatureData(Dataset):
-    def __init__(self, mode, data):
-        self.data = data
-        self.mode = mode
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        item = self.data[idx]
-        if self.mode == "train":
-            return (
-                torch.tensor(item["unique_index"]).long(),
-                torch.tensor(item["input_ids"]).long(),
-                torch.tensor(item["input_mask"]).long(),
-                torch.tensor(item["segment_ids"]).long(),
-                torch.tensor(item["start_position"]).long(),
-                torch.tensor(item["end_position"]).long(),
-                torch.tensor(item["answer_type"]).long(),
-            )
-        elif self.mode == "evaluation":
-            return (
-                torch.tensor(item["unique_index"]).long(),
-                torch.tensor(item["input_ids"]).long(),
-                torch.tensor(item["input_mask"]).long(),
-                torch.tensor(item["segment_ids"]).long(),
-                torch.tensor(item["token_map"]).long(),
-            )
 
 
 def construct_optimizer(args, model, num_train_examples):
@@ -210,6 +181,12 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="fix random seed")
     parser.add_argument("--bert_type", type=str, default="bert_base_uncased")
     parser.add_argument(
+        "--plain",
+        type=bool,
+        default=False,
+        help="whether to compute the best f1, precision and recall or not",
+    )
+    parser.add_argument(
         "--data_dir",
         type=str,
         default="preprocessed_data_full_train.json",
@@ -222,13 +199,13 @@ if __name__ == "__main__":
         help="location where the trained model will be saved or loaded",
     )
     parser.add_argument("--continue_training", type=bool, default=False)
-    parser.add_argument("--train", type=bool, default=True)
+    parser.add_argument("--train", type=bool, default=False)
     # training related
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epoch", type=int, default=1)
     parser.add_argument("--warm_up_proportion", type=float, default=0.1)
     # actual batch_size 32
-    parser.add_argument("--accumulate_gradient_steps", type=int, default=2)
+    parser.add_argument("--accumulate_gradient_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--clip", type=float, default=1)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
@@ -263,7 +240,7 @@ if __name__ == "__main__":
     parser.add_argument("--logging_step", type=int, default=100)
     parser.add_argument("--eval_logging_steps", type=int, default=1000)
 
-    parser.add_argument("--gpu", type=str, default="1,2")
+    parser.add_argument("--gpu", type=str, default="0")
 
     args = parser.parse_args()
 
@@ -504,18 +481,49 @@ if __name__ == "__main__":
             args, gold_label, pred_label
         )
 
-        (
-            long_precision,
-            long_recall,
-            long_f1,
-            short_precision,
-            short_recall,
-            short_f1,
-        ) = compute_f1(long_answer_stats, short_answer_stats)
+        if args.plain:
+            (
+                long_precision,
+                long_recall,
+                long_f1,
+                short_precision,
+                short_recall,
+                short_f1,
+            ) = compute_plain_f1(long_answer_stats, short_answer_stats)
 
-        logger.log("Long answer precision is: {}".format(long_precision))
-        logger.log("Long answer recall is: {}".format(long_recall))
-        logger.log("Long answer f1 is: {}".format(long_f1))
-        logger.log("Short answer precision is: {}".format(short_precision))
-        logger.log("Short answer recall is: {}".format(short_recall))
-        logger.log("Short answer f1 is: {}".format(short_f1))
+            logger.log("Long answer precision is: {}".format(long_precision))
+            logger.log("Long answer recall is: {}".format(long_recall))
+            logger.log("Long answer f1 is: {}".format(long_f1))
+            logger.log("Short answer precision is: {}".format(short_precision))
+            logger.log("Short answer recall is: {}".format(short_recall))
+            logger.log("Short answer f1 is: {}".format(short_f1))
+
+        else:
+            (
+                (
+                    best_long_f1,
+                    best_long_precision,
+                    best_long_recall,
+                    best_long_threshold,
+                ),
+                _,
+            ) = compute_best_f1(long_answer_stats, targets=[0.5, 0.75, 0.9])
+
+            (
+                (
+                    best_short_f1,
+                    best_short_precision,
+                    best_short_recall,
+                    best_short_threshold,
+                ),
+                _,
+            ) = compute_best_f1(short_answer_stats, targets=[0.5, 0.75, 0.9])
+
+            logger.log("Long answer score threshold: {}".format(best_long_threshold))
+            logger.log("Long answer precision is: {}".format(best_long_precision))
+            logger.log("Long answer recall is: {}".format(best_long_recall))
+            logger.log("Long answer f1 is: {}".format(best_long_f1))
+            logger.log("Short answer score threshold: {}".format(best_short_threshold))
+            logger.log("Short answer precision is: {}".format(best_short_precision))
+            logger.log("Short answer recall is: {}".format(best_short_recall))
+            logger.log("Short answer f1 is: {}".format(best_short_f1))

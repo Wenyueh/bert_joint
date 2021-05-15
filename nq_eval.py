@@ -3,7 +3,10 @@ import collections
 import gzip
 import json
 import os
+from collections import OrderedDict
 from urllib.parse import ParseResultBytes
+
+from six import iteritems
 
 # load the two files: gold file and prediction file
 # gold: example_id: nqlabels
@@ -23,6 +26,8 @@ from urllib.parse import ParseResultBytes
 #
 # based on compute_long_answer_score and compute_short_answer_score:
 # compute recall, precision, f1
+#
+
 
 NQLabel = collections.namedtuple(
     "NQLabel",
@@ -35,6 +40,13 @@ NQLabel = collections.namedtuple(
         "short_score",
     ],
 )
+
+
+def safe_divide(x, y):
+    if y == 0:
+        return 0
+    else:
+        return x / y
 
 
 def load_gold_labels(args):
@@ -194,8 +206,6 @@ def score_short_answer(args, gold_list, pred_list):
         pred_short_answer = pred_list.short_answer_span_list
         for one_gold_list in gold_list:
             if one_gold_list.short_answer_span_list == pred_short_answer:
-                print(one_gold_list.short_answer_span_list)
-                print(pred_list)
                 is_correct = True
                 break
 
@@ -221,11 +231,64 @@ def score_predictions(args, gold_label, pred_label):
         long_answer_stats.append(score_long_answer(args, gold, pred))
         short_answer_stats.append(score_short_answer(args, gold, pred))
 
+    # sort by score in order to faciliate finding score that maximizes R@P
+    long_answer_stats = sorted(long_answer_stats, key=lambda x: x[-1], reverse=True)
+    short_answer_stats = sorted(short_answer_stats, key=lambda x: x[-1], reverse=True)
+
     return long_answer_stats, short_answer_stats
 
 
+# targets is a list of numbers in [0,1]
+def compute_best_f1(stats, targets):
+
+    total_has_gold = 0
+    total_has_pred = 0
+    total_correct = 0
+
+    for has_gold, _, _, _ in stats:
+        total_has_gold += has_gold
+
+    max_recall = [0 for _ in targets]
+    max_precision = [0 for _ in targets]
+    max_score = [None for _ in targets]
+
+    scores_to_stats = OrderedDict()
+    for has_gold, has_pred, is_correct, score in stats:
+        total_correct += is_correct
+        total_has_pred += has_pred
+
+        precision = safe_divide(total_correct, total_has_pred)
+        recall = safe_divide(total_correct, total_has_gold)
+
+        scores_to_stats[score] = (precision, recall)
+
+    best_recall = 0
+    best_precision = 0
+    best_f1 = 0
+    best_threshold = 0
+
+    for score_threshold, (precision, recall) in iteritems(scores_to_stats):
+        for i, target in enumerate(targets):
+            if precision >= target and recall > max_recall[i]:
+                max_recall[i] = recall
+                max_precision[i] = precision
+                max_score[i] = score_threshold
+
+        f1 = 2 * safe_divide((recall * precision), recall + precision)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_precision = precision
+            best_recall = recall
+            best_threshold = score_threshold
+
+    return (
+        (best_f1 * 100, best_precision * 100, best_recall * 100, best_threshold),
+        list(zip(targets, max_recall, max_precision, max_score)),
+    )
+
+
 # compute precision, recall, f1 for long and short
-def compute_f1(long_answer_stats, short_answer_stats):
+def compute_plain_f1(long_answer_stats, short_answer_stats):
     # compute long
     total_long_gold = 0
     total_long_pred = 0
@@ -236,12 +299,11 @@ def compute_f1(long_answer_stats, short_answer_stats):
         total_long_pred += pred_has_long
         total_long_correct += is_correct
 
-    long_precision = total_long_correct / total_long_pred
-    long_recall = total_long_correct / total_long_gold
-    if long_precision == 0 and long_recall == 0:
-        long_f1 = 0
-    else:
-        long_f1 = 2 * (long_precision * long_recall) / (long_precision + long_recall)
+    long_precision = safe_divide(total_long_correct, total_long_pred)
+    long_recall = safe_divide(total_long_correct, total_long_gold)
+    long_f1 = 2 * safe_divide(
+        (long_precision * long_recall), (long_precision + long_recall)
+    )
 
     # compute short
     total_short_gold = 0
@@ -253,14 +315,11 @@ def compute_f1(long_answer_stats, short_answer_stats):
         total_short_pred += pred_has_short
         total_short_correct += is_correct
 
-    short_precision = total_short_correct / total_short_pred
-    short_recall = total_short_correct / total_short_gold
-    if short_precision == 0 and short_recall == 0:
-        short_f1 = 0
-    else:
-        short_f1 = (
-            2 * (short_precision * short_recall) / (short_precision + short_recall)
-        )
+    short_precision = safe_divide(total_short_correct, total_short_pred)
+    short_recall = safe_divide(total_short_correct, total_short_gold)
+    short_f1 = 2 * safe_divide(
+        (short_precision * short_recall), (short_precision + short_recall)
+    )
 
     return (
         long_precision * 100,

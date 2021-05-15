@@ -10,7 +10,9 @@ data preprocessing: prepare_nq_data.py
 
 modeling and computing loss: model.py
 
-initialization by pretrained SQuAD model: https://www.dropbox.com/s/8jnulb2l4v7ikir/model.zip
+initialization by bert_large pretrained SQuAD model: https://www.dropbox.com/s/8jnulb2l4v7ikir/model.zip
+
+initialization by bert_base pretrained SQuAD model: https://huggingface.co/twmkn9/bert-base-uncased-squad2/tree/main
 
 initialization, training process, prediction process, evaluation process: main.py
 
@@ -23,9 +25,17 @@ python main.py
 
 --data_dir (preprocessed training data directory)
 
+--bert_type (bert_base_uncased; bert_large_uncased)
+
 --squad_model (BERT checkpoint trained on SQuAD 2.0)
 
 --model (the directory to save/load the trained model)
+
+--train (whether the train the model)
+
+--eval (whether to evaluate the model; it could be the case that both --train and --eval are true)
+
+--continue_training (whether to load a trained checkpoint and keep training the model)
 
 --eval_data_dir (the original data for evaluation, non-preprocessed)
 

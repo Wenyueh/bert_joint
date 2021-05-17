@@ -3,6 +3,7 @@ import collections
 import gzip
 import json
 import os
+import sys
 from collections import OrderedDict
 from urllib.parse import ParseResultBytes
 
@@ -177,6 +178,22 @@ def is_null_span_list(span_list):
     return is_null
 
 
+def span_set_equal(gold_span_list, pred_span_list):
+
+    gold_span_list = [span for span in gold_span_list if not is_null_span(span)]
+    pred_span_list = [span for span in pred_span_list if not is_null_span(span)]
+
+    for pspan in pred_span_list:
+        if not any([pspan == gspan for gspan in gold_span_list]):
+            return False
+
+    for gspan in gold_span_list:
+        if not any([pspan == gspan for pspan in pred_span_list]):
+            return False
+
+    return True
+
+
 def gold_has_short_answer(threshold, gold_list):
     number = 0
 
@@ -205,7 +222,7 @@ def score_short_answer(args, gold_list, pred_list):
     if gold_has_answer and pred_has_answer:
         pred_short_answer = pred_list.short_answer_span_list
         for one_gold_list in gold_list:
-            if one_gold_list.short_answer_span_list == pred_short_answer:
+            if span_set_equal(one_gold_list.short_answer_span_list, pred_short_answer):
                 is_correct = True
                 break
 
@@ -299,10 +316,14 @@ def compute_plain_f1(long_answer_stats, short_answer_stats):
         total_long_pred += pred_has_long
         total_long_correct += is_correct
 
+    print("this is total long correct number:{}".format(total_long_correct))
+    print("this is total long predicted number:{}".format(total_long_pred))
+    print("this is total long gold number:{}".format(total_long_gold))
+
     long_precision = safe_divide(total_long_correct, total_long_pred)
     long_recall = safe_divide(total_long_correct, total_long_gold)
-    long_f1 = 2 * safe_divide(
-        (long_precision * long_recall), (long_precision + long_recall)
+    long_f1 = safe_divide(
+        2 * (long_precision * long_recall), (long_precision + long_recall)
     )
 
     # compute short
@@ -315,10 +336,14 @@ def compute_plain_f1(long_answer_stats, short_answer_stats):
         total_short_pred += pred_has_short
         total_short_correct += is_correct
 
+    print("this is total short correct number:{}".format(total_short_correct))
+    print("this is total short predicted number:{}".format(total_short_pred))
+    print("this is total short gold number:{}".format(total_short_gold))
+
     short_precision = safe_divide(total_short_correct, total_short_pred)
     short_recall = safe_divide(total_short_correct, total_short_gold)
-    short_f1 = 2 * safe_divide(
-        (short_precision * short_recall), (short_precision + short_recall)
+    short_f1 = safe_divide(
+        2 * (short_precision * short_recall), (short_precision + short_recall)
     )
 
     return (
@@ -329,3 +354,107 @@ def compute_plain_f1(long_answer_stats, short_answer_stats):
         short_recall * 100,
         short_f1 * 100,
     )
+
+
+if __name__ == "__main__":
+
+    class Logger:
+        def __init__(self, path):
+            self.log_path = path
+
+        def log(self, string, newline=True):
+            with open(self.log_path, "a") as f:
+                f.write(string)
+                if newline:
+                    f.write("\n")
+
+            sys.stdout.write(string)
+            if newline:
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--log_path", type=str, default="dev.log")
+    parser.add_argument("--long_non_null_answer_threshold", type=int, default=2)
+    parser.add_argument("--short_non_null_answer_threshold", type=int, default=2)
+    parser.add_argument(
+        "--plain",
+        type=bool,
+        default=True,
+        help="whether to compute the best f1, precision and recall or not",
+    )
+    parser.add_argument(
+        "--eval_data_dir",
+        type=str,
+        default="data/full/dev",
+        help="the original data for evaluation, non-preprocessed",
+    )
+    parser.add_argument(
+        "--eval_feature_dir",
+        type=str,
+        default="preprocessed_data_full_dev.json",
+        help="the preprocessed evaluation data directory",
+    )
+    parser.add_argument(
+        "--eval_result_dir",
+        type=str,
+        default="prediction_result.json",
+        help="the directory to save predictions of the model on eval dataset",
+    )
+
+    args = parser.parse_args()
+
+    logger = Logger(args.log_path)
+    logger.log(str(args))
+
+    # compute evaluation on long answers and short answers
+    gold_label = load_gold_labels(args)
+    # load prediction data and transform to nq_lable structure
+    # id: nq_label
+    pred_label = load_prediction_labels(args)
+
+    long_answer_stats, short_answer_stats = score_predictions(
+        args, gold_label, pred_label
+    )
+
+    if args.plain:
+        (
+            long_precision,
+            long_recall,
+            long_f1,
+            short_precision,
+            short_recall,
+            short_f1,
+        ) = compute_plain_f1(long_answer_stats, short_answer_stats)
+
+        logger.log("Long answer precision is: {}".format(long_precision))
+        logger.log("Long answer recall is: {}".format(long_recall))
+        logger.log("Long answer f1 is: {}".format(long_f1))
+        logger.log("Short answer precision is: {}".format(short_precision))
+        logger.log("Short answer recall is: {}".format(short_recall))
+        logger.log("Short answer f1 is: {}".format(short_f1))
+
+    else:
+        (
+            (best_long_f1, best_long_precision, best_long_recall, best_long_threshold,),
+            _,
+        ) = compute_best_f1(long_answer_stats, targets=[0.5, 0.75, 0.9])
+
+        (
+            (
+                best_short_f1,
+                best_short_precision,
+                best_short_recall,
+                best_short_threshold,
+            ),
+            _,
+        ) = compute_best_f1(short_answer_stats, targets=[0.5, 0.75, 0.9])
+
+        logger.log("Long answer score threshold: {}".format(best_long_threshold))
+        logger.log("Long answer precision is: {}".format(best_long_precision))
+        logger.log("Long answer recall is: {}".format(best_long_recall))
+        logger.log("Long answer f1 is: {}".format(best_long_f1))
+        logger.log("Short answer score threshold: {}".format(best_short_threshold))
+        logger.log("Short answer precision is: {}".format(best_short_precision))
+        logger.log("Short answer recall is: {}".format(best_short_recall))
+        logger.log("Short answer f1 is: {}".format(best_short_f1))

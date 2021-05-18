@@ -18,7 +18,7 @@ from compute_predictions import (compute_candidate_dict,
                                  compute_full_token_map_dict,
                                  compute_predictions)
 from model import Classification
-from my_prepare_nq_data import FeatureData
+from prepare_nq_data import FeatureData
 from nq_eval import (compute_best_f1, compute_plain_f1, load_gold_labels,
                      load_prediction_labels, score_predictions)
 

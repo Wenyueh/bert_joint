@@ -8,6 +8,7 @@ import random
 import re
 
 import torch
+from torch.utils.data import Dataset
 from transformers import BertTokenizer
 
 # get_example
@@ -650,6 +651,36 @@ class InputFeatures:
         self.end_position = end_position
         self.answer_text = answer_text
         self.answer_type = answer_type
+
+
+class FeatureData(Dataset):
+    def __init__(self, mode, data):
+        self.data = data
+        self.mode = mode
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        if self.mode == "train":
+            return (
+                torch.tensor(item["unique_index"]).long(),
+                torch.tensor(item["input_ids"]).long(),
+                torch.tensor(item["input_mask"]).long(),
+                torch.tensor(item["segment_ids"]).long(),
+                torch.tensor(item["start_position"]).long(),
+                torch.tensor(item["end_position"]).long(),
+                torch.tensor(item["answer_type"]).long(),
+            )
+        elif self.mode == "evaluation":
+            return (
+                torch.tensor(item["unique_index"]).long(),
+                torch.tensor(item["input_ids"]).long(),
+                torch.tensor(item["input_mask"]).long(),
+                torch.tensor(item["segment_ids"]).long(),
+                torch.tensor(item["token_map"]).long(),
+            )
 
 
 if __name__ == "__main__":

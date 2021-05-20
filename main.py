@@ -18,7 +18,7 @@ from compute_predictions import (compute_candidate_dict,
                                  compute_full_token_map_dict,
                                  compute_predictions)
 from model import Classification
-from prepare_nq_data import FeatureData
+from my_prepare_nq_data import FeatureData
 from nq_eval import (compute_best_f1, compute_plain_f1, load_gold_labels,
                      load_prediction_labels, score_predictions)
 
@@ -158,8 +158,11 @@ def load_model(args, predict):
 
     modified_trained_model = OrderedDict()
     for k, v in trained_model.items():
-        if k[:4] == "bert":
+        if k[:4] == "bert":  # for bert_base
             newk = k.replace("bert", "encoder")
+            modified_trained_model[newk] = v
+        elif k[:7] == "module.":  # for bert_large
+            newk = k.replace("module.", "")
             modified_trained_model[newk] = v
         else:
             modified_trained_model[k] = v
@@ -179,13 +182,7 @@ def load_model(args, predict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42, help="fix random seed")
-    parser.add_argument("--bert_type", type=str, default="bert_base_uncased")
-    parser.add_argument(
-        "--plain",
-        type=bool,
-        default=False,
-        help="whether to compute the best f1, precision and recall or not",
-    )
+    parser.add_argument("--bert_type", type=str, default="bert_large_uncased")
     parser.add_argument(
         "--data_dir",
         type=str,
@@ -195,7 +192,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="best_model.pt",
+        default="large_best_model.pt",
         help="location where the trained model will be saved or loaded",
     )
     parser.add_argument("--continue_training", type=bool, default=False)
@@ -205,14 +202,14 @@ if __name__ == "__main__":
     parser.add_argument("--epoch", type=int, default=1)
     parser.add_argument("--warm_up_proportion", type=float, default=0.1)
     # actual batch_size 32
-    parser.add_argument("--accumulate_gradient_steps", type=int, default=1)
+    parser.add_argument("--accumulate_gradient_steps", type=int, default=4)
     parser.add_argument("--learning_rate", type=float, default=3e-5)
     parser.add_argument("--clip", type=float, default=1)
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--save_checkpoint_steps", type=int, default=1000)
     # eval
     parser.add_argument("--evaluation", type=bool, default=True)
-    parser.add_argument("--eval_batch_size", type=int, default=4)
+    parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--best_n_size", type=int, default=10)
     parser.add_argument("--max_answer_length", type=int, default=30)
     parser.add_argument(
@@ -230,7 +227,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--eval_result_dir",
         type=str,
-        default="prediction_result.json",
+        default="large_prediction_result.json",
         help="the directory to save predictions of the model on eval dataset",
     )
     parser.add_argument("--long_non_null_answer_threshold", type=int, default=2)
@@ -240,7 +237,7 @@ if __name__ == "__main__":
     parser.add_argument("--logging_step", type=int, default=100)
     parser.add_argument("--eval_logging_steps", type=int, default=1000)
 
-    parser.add_argument("--gpu", type=str, default="0")
+    parser.add_argument("--gpu", type=str, default="0,1")
 
     args = parser.parse_args()
 
@@ -395,7 +392,6 @@ if __name__ == "__main__":
         logger.log("Finished loading trained model for evaluation.")
 
         summary_list = []
-        start = True
         for batch_num, batch in enumerate(eval_loader):
             # input to the model
             unique_index = batch[0].cuda()
@@ -481,49 +477,46 @@ if __name__ == "__main__":
             args, gold_label, pred_label
         )
 
-        if args.plain:
+        (
+            long_precision,
+            long_recall,
+            long_f1,
+            short_precision,
+            short_recall,
+            short_f1,
+        ) = compute_plain_f1(long_answer_stats, short_answer_stats)
+
+        logger.log("*" * 20)
+        logger.log("Print plain score result")
+        logger.log("Long answer precision is: {}".format(long_precision))
+        logger.log("Long answer recall is: {}".format(long_recall))
+        logger.log("Long answer f1 is: {}".format(long_f1))
+        logger.log("Short answer precision is: {}".format(short_precision))
+        logger.log("Short answer recall is: {}".format(short_recall))
+        logger.log("Short answer f1 is: {}".format(short_f1))
+
+        (
+            (best_long_f1, best_long_precision, best_long_recall, best_long_threshold,),
+            _,
+        ) = compute_best_f1(long_answer_stats, targets=[0.5, 0.75, 0.9])
+
+        (
             (
-                long_precision,
-                long_recall,
-                long_f1,
-                short_precision,
-                short_recall,
-                short_f1,
-            ) = compute_plain_f1(long_answer_stats, short_answer_stats)
+                best_short_f1,
+                best_short_precision,
+                best_short_recall,
+                best_short_threshold,
+            ),
+            _,
+        ) = compute_best_f1(short_answer_stats, targets=[0.5, 0.75, 0.9])
 
-            logger.log("Long answer precision is: {}".format(long_precision))
-            logger.log("Long answer recall is: {}".format(long_recall))
-            logger.log("Long answer f1 is: {}".format(long_f1))
-            logger.log("Short answer precision is: {}".format(short_precision))
-            logger.log("Short answer recall is: {}".format(short_recall))
-            logger.log("Short answer f1 is: {}".format(short_f1))
-
-        else:
-            (
-                (
-                    best_long_f1,
-                    best_long_precision,
-                    best_long_recall,
-                    best_long_threshold,
-                ),
-                _,
-            ) = compute_best_f1(long_answer_stats, targets=[0.5, 0.75, 0.9])
-
-            (
-                (
-                    best_short_f1,
-                    best_short_precision,
-                    best_short_recall,
-                    best_short_threshold,
-                ),
-                _,
-            ) = compute_best_f1(short_answer_stats, targets=[0.5, 0.75, 0.9])
-
-            logger.log("Long answer score threshold: {}".format(best_long_threshold))
-            logger.log("Long answer precision is: {}".format(best_long_precision))
-            logger.log("Long answer recall is: {}".format(best_long_recall))
-            logger.log("Long answer f1 is: {}".format(best_long_f1))
-            logger.log("Short answer score threshold: {}".format(best_short_threshold))
-            logger.log("Short answer precision is: {}".format(best_short_precision))
-            logger.log("Short answer recall is: {}".format(best_short_recall))
-            logger.log("Short answer f1 is: {}".format(best_short_f1))
+        logger.log("*" * 20)
+        logger.log("Print optimized score result")
+        logger.log("Long answer score threshold: {}".format(best_long_threshold))
+        logger.log("Long answer precision is: {}".format(best_long_precision))
+        logger.log("Long answer recall is: {}".format(best_long_recall))
+        logger.log("Long answer f1 is: {}".format(best_long_f1))
+        logger.log("Short answer score threshold: {}".format(best_short_threshold))
+        logger.log("Short answer precision is: {}".format(best_short_precision))
+        logger.log("Short answer recall is: {}".format(best_short_recall))
+        logger.log("Short answer f1 is: {}".format(best_short_f1))

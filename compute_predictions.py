@@ -2,55 +2,7 @@ import gzip
 import json
 import os
 
-
-# compute candidate_dict: id:candidates
-# based on id, concatenate corresponding candidate list with predictions
-# compute predictions with the corresponding id
-# collect them and write them to json file
-def compute_pred_dict(args, raw_results):
-    candidate_dict = sorted(compute_candidate_dict(args).items())
-
-    full_token_map_dict = compute_full_token_map_dict(args)
-
-    # delete useless token_maps
-    token_map_dict = {}
-    for key in raw_results.keys():
-        token_map_dict[key[0]] = full_token_map_dict[key]
-
-    # leave only the first part of the key, the example_id used in original data
-    new_raw_results = {}
-    for k, v in raw_results.items():
-        new_raw_results[k[0]] = v
-
-    full_token_map_dict = sorted(token_map_dict.items())
-
-    raw_results = sorted(raw_results.item())
-
-    assert candidate_dict.keys() == token_map_dict.keys() == raw_results.keys()
-
-    # based on raw results with ids and candidate dict
-    candidate_prediction_results = {}
-    for key in candidate_dict.keys():
-        candidate_prediction_results[key] = {
-            "candidates": candidate_dict[key],
-            "token_map": token_map_dict[key],
-            "raw_results": raw_results[key],
-        }
-
-    summary_list = []
-
-    for id, candidate_prediction_result in candidate_prediction_results.items():
-        candidates = candidate_prediction_result["candidates"]
-        token_map = candidate_prediction_result["token_map"]
-        logits = candidate_prediction_result["raw_results"]["logits"]
-        predictions = candidate_prediction_result["raw_results"]
-
-        summary = compute_predictions(
-            args, id, candidates, token_map, logits, predictions
-        )
-        summary_list.append(summary)
-
-    return summary_list
+import torch
 
 
 # candidates_dict[example_id] = [long_answer_candidiates]
@@ -76,6 +28,33 @@ def compute_full_token_map_dict(eval_feature_dir):
         token_map = data["token_map"]
         token_map_dict[unique_index] = token_map
     return token_map_dict
+
+
+def each_result(i, predictions, logits):
+    one_prediction = {
+        "start_predictions": torch.cat(
+            (
+                predictions["start_predictions"][0][i].unsqueeze(0),
+                predictions["start_predictions"][1][i].unsqueeze(0) + 1,
+            ),
+            dim=0,
+        ).tolist(),
+        "end_predictions": torch.cat(
+            (
+                predictions["end_predictions"][0][i].unsqueeze(0),
+                predictions["end_predictions"][1][i].unsqueeze(0) + 1,
+            ),
+            dim=0,
+        ).tolist(),
+        "type_predictions": predictions["type_predictions"][i].tolist(),
+    }
+    one_logit = {
+        "start_logits": logits["start_logits"][i].tolist(),
+        "end_logits": logits["end_logits"][i].tolist(),
+        "type_logits": logits["type_logits"][i].tolist(),
+    }
+
+    return one_prediction, one_logit
 
 
 # for each id
@@ -160,3 +139,22 @@ def compute_predictions(args, id, candidates, token_map, logits, predictions):
     }
 
     return summary
+
+
+# for each instance I have one prediction
+# need to combine them so that each example_id has one prediction
+def pick_best_prediction(summary_list):
+    combined_predictions = {}
+    best_predictions = {}
+
+    for pred in summary_list:
+        if pred["example_id"] not in combined_predictions.keys():
+            combined_predictions[pred["example_id"]] = [pred]
+        else:
+            combined_predictions[pred["example_id"]].append(pred)
+
+    for id, preds in combined_predictions.items():
+        best_pred = sorted(preds, key=lambda a: a["short_score"], reverse=True)[0]
+        best_predictions[id] = best_pred
+
+    return best_predictions

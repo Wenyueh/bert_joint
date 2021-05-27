@@ -9,14 +9,14 @@ from os.path import isdir
 
 import torch
 import torch.nn as nn
-from numpy.lib.function_base import _parse_gufunc_signature
 from torch.utils.data import DataLoader, Dataset
 # transformers version 3.0.2
 from transformers import BertConfig, BertModel, get_linear_schedule_with_warmup
 
 from compute_predictions import (compute_candidate_dict,
                                  compute_full_token_map_dict,
-                                 compute_predictions)
+                                 compute_predictions, each_result,
+                                 pick_best_prediction)
 from model import Classification
 from my_prepare_nq_data import FeatureData
 from nq_eval import (compute_best_f1, compute_plain_f1, load_gold_labels,
@@ -92,30 +92,6 @@ def initialize_by_squad_checkpoint(args):
 
     squad_pretrained_parameters = OrderedDict()
 
-    """
-    # initialize both the bert encoder and the qa_output layer
-    for k, v in checkpoint.items():
-        if "bert" in k:
-            k = (
-                "encoder." + k[5:]
-            )  # change from bert.encoder.xxx to encoder.encoder.xxx
-        if k != "qa_outputs.weight" and k != "qa_outputs.bias":
-            squad_pretrained_parameters[k] = v
-        elif k == "qa_outputs.weight":
-            squad_pretrained_parameters["start_weights.weight"] = v[0].unsqueeze(0)
-            squad_pretrained_parameters["end_weights.weight"] = v[1].unsqueeze(0)
-        elif k == "qa_outputs.bias":
-            squad_pretrained_parameters["start_weights.bias"] = v[0].unsqueeze(0)
-            squad_pretrained_parameters["end_weights.bias"] = v[1].unsqueeze(0)
-
-    config = BertConfig.from_json_file(args.bert_config)
-
-    encoder = BertModel(config=config)
-
-    model = Classification(args, encoder)
-    model.load_state_dict(squad_pretrained_parameters, strict=False)
-    """
-
     # initialize only the bert encoder
     # the qa_outputs weight and bias are not used based on the original code
     # since different names are used for the parameters: cls/nq/output_weights
@@ -128,9 +104,6 @@ def initialize_by_squad_checkpoint(args):
 
     config = BertConfig.from_json_file(args.bert_config)
 
-    # initialize both the bert encoder and the qa_output layer
-    # the qa_outputs weight and bias are not used based on the original code
-    # since different names are used for the parameters: cls/nq/output_weights
     encoder = BertModel(config=config)
     encoder.load_state_dict(squad_pretrained_parameters)
 
@@ -195,8 +168,16 @@ if __name__ == "__main__":
         default="large_best_model.pt",
         help="location where the trained model will be saved or loaded",
     )
+    # to train, evaluate or just compute the score for prediction result
     parser.add_argument("--continue_training", type=bool, default=False)
     parser.add_argument("--train", type=bool, default=False)
+    parser.add_argument("--evaluation", type=bool, default=True)
+    parser.add_argument(
+        "--compute_scores",
+        type=bool,
+        default=True,
+        help="whether to compute the scores for the predictions",
+    )
     # training related
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--epoch", type=int, default=1)
@@ -208,26 +189,25 @@ if __name__ == "__main__":
     parser.add_argument("--weight_decay", type=float, default=1e-5)
     parser.add_argument("--save_checkpoint_steps", type=int, default=1000)
     # eval
-    parser.add_argument("--evaluation", type=bool, default=True)
     parser.add_argument("--eval_batch_size", type=int, default=2)
     parser.add_argument("--best_n_size", type=int, default=10)
     parser.add_argument("--max_answer_length", type=int, default=30)
     parser.add_argument(
         "--eval_data_dir",
         type=str,
-        default="data/full/dev",
+        default="data/dev/dev",
         help="the original data for evaluation, non-preprocessed",
     )
     parser.add_argument(
         "--eval_feature_dir",
         type=str,
-        default="preprocessed_data_full_dev.json",
+        default="preprocessed_data_dev_dev.json",
         help="the preprocessed evaluation data directory",
     )
     parser.add_argument(
         "--eval_result_dir",
         type=str,
-        default="large_prediction_result.json",
+        default="dev_prediction_result.json",
         help="the directory to save predictions of the model on eval dataset",
     )
     parser.add_argument("--long_non_null_answer_threshold", type=int, default=2)
@@ -237,7 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("--logging_step", type=int, default=100)
     parser.add_argument("--eval_logging_steps", type=int, default=1000)
 
-    parser.add_argument("--gpu", type=str, default="0,1")
+    parser.add_argument("--gpu", type=str, default="1")
 
     args = parser.parse_args()
 
@@ -413,28 +393,9 @@ if __name__ == "__main__":
             )
 
             for i in range(unique_index.size(0)):
-                one_prediction = {
-                    "start_predictions": torch.cat(
-                        (
-                            predictions["start_predictions"][0][i].unsqueeze(0),
-                            predictions["start_predictions"][1][i].unsqueeze(0) + 1,
-                        ),
-                        dim=0,
-                    ).tolist(),
-                    "end_predictions": torch.cat(
-                        (
-                            predictions["end_predictions"][0][i].unsqueeze(0),
-                            predictions["end_predictions"][1][i].unsqueeze(0) + 1,
-                        ),
-                        dim=0,
-                    ).tolist(),
-                    "type_predictions": predictions["type_predictions"][i].tolist(),
-                }
-                one_logit = {
-                    "start_logits": logits["start_logits"][i].tolist(),
-                    "end_logits": logits["end_logits"][i].tolist(),
-                    "type_logits": logits["type_logits"][i].tolist(),
-                }
+
+                # compute each prediction and corresponding logit for each example
+                one_prediction, one_logit = each_result(i, predictions, logits)
 
                 # compile the prediction result
                 # find corresponding long_answer_candidates
@@ -464,18 +425,19 @@ if __name__ == "__main__":
                     )
                 )
 
+        # for each example's many predictions (instances), pick the best prediction
+        best_predictions = pick_best_prediction(summary_list)
+
+        # record the result for future study
         with open(args.eval_result_dir, "w") as f:
-            json.dump(summary_list, f)
+            json.dump(best_predictions, f)
 
-        # compute evaluation on long answers and short answers
-        gold_label = load_gold_labels(args)
-        # load prediction data and transform to nq_lable structure
-        # id: nq_label
-        pred_label = load_prediction_labels(args)
-
-        long_answer_stats, short_answer_stats = score_predictions(
-            args, gold_label, pred_label
-        )
+    # should always be true
+    # set this option just in case when prediction file is computed
+    # and we only wnat to test the scoring functions
+    if args.compute_scores:
+        # compute the statistic for both long answers and short answers
+        long_answer_stats, short_answer_stats = score_predictions(args)
 
         (
             long_precision,

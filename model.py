@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from transformers import BertConfig, BertModel
 
+from utils import truncated_normal_
+
 # initialize bert model (input_ids, input_mask, segment_ids)
 # add two dense layers + biases, since we have start/end to predict
 # output logits
@@ -32,18 +34,6 @@ class Classification(nn.Module):
 
         self.loss_fct = nn.CrossEntropyLoss()
 
-        # weight initialization:
-        # 0 for bias
-        # truncated normal distribution for weights
-        def truncated_normal_(tensor, mean=0, std=0.02):
-            size = tensor.shape
-            tmp = tensor.new_empty(size + (4,)).normal_()
-            valid = (tmp < 2) & (tmp > -2)
-            ind = valid.max(-1, keepdim=True)[1]
-            tensor.data.copy_(tmp.gather(-1, ind).squeeze(-1))
-            tensor.data.mul_(std).add_(mean)
-            return tensor
-
         self.start_weights.weight.data = truncated_normal_(self.start_weights.weight)
         self.end_weights.weight.data = truncated_normal_(self.end_weights.weight)
         self.type_weights.weight.data = truncated_normal_(self.type_weights.weight)
@@ -72,7 +62,7 @@ class Classification(nn.Module):
 
         start_logits = self.start_weights(sequence_hidden).squeeze()  # B, seq_len
         end_logits = self.end_weights(sequence_hidden).squeeze()  # B, seq_len
-        type_logits = self.type_weights(cls_hidden)  # B, 5
+        type_logits = self.type_weights(cls_hidden).squeeze()  # B, 5
 
         if len(start_logits.size()) == 1:
             start_logits = start_logits.unsqueeze(0)
@@ -97,7 +87,7 @@ class Classification(nn.Module):
             loss = (start_loss + end_loss + type_loss) / 3.0
 
         # compute prediction
-        # return best 20 positions, sorted from high to low based on logits
+        # return best 20 positions ignoring CLS, sorted from high to low based on logits
         # tested right
         start_predictions = torch.topk(
             start_logits[:, 1:], self.args.best_n_size, dim=1

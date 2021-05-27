@@ -50,10 +50,10 @@ def safe_divide(x, y):
         return x / y
 
 
-def load_gold_labels(args):
+def load_gold_labels(eval_data_dir):
     gold_dict = {}
-    for each_file in os.listdir(args.eval_data_dir):
-        with gzip.GzipFile(args.eval_data_dir + "/" + each_file, "rb") as f:
+    for each_file in os.listdir(eval_data_dir):
+        with gzip.GzipFile(eval_data_dir + "/" + each_file, "rb") as f:
             for line in f:
                 data = json.loads(line)
 
@@ -90,24 +90,11 @@ def load_gold_labels(args):
 
 # select predictions
 # compile to nqlable
-def load_prediction_labels(args):
+def load_prediction_labels(eval_result_dir):
     nq_pred_dict = {}
 
-    with open(args.eval_result_dir, "r") as f:
-        predictions = json.load(f)
-
-    # now for each instance I have one prediction
-    # need to combine them so that each example_id has one prediction
-    combined_predictions = {}
-    best_predictions = {}
-    for pred in predictions:
-        if pred["example_id"] not in combined_predictions.keys():
-            combined_predictions[pred["example_id"]] = [pred]
-        else:
-            combined_predictions[pred["example_id"]].append(pred)
-    for id, preds in combined_predictions.items():
-        best_pred = sorted(preds, key=lambda a: a["short_score"], reverse=True)[0]
-        best_predictions[id] = best_pred
+    with open(eval_result_dir, "r") as f:
+        best_predictions = json.load(f)
 
     for id, prediction in best_predictions.items():
         pred_item = NQLabel(
@@ -232,7 +219,11 @@ def score_short_answer(args, gold_list, pred_list):
 # first check whether the ids are the same
 # score long answer
 # score short answer
-def score_predictions(args, gold_label, pred_label):
+def score_predictions(args):
+    # load gold annotations and prediction annotations
+    gold_label = load_gold_labels(args.eval_data_dir)
+    pred_label = load_prediction_labels(args.eval_result_dir)
+
     gold_label_ids = gold_label.keys()
     pred_label_ids = pred_label.keys()
 
@@ -380,7 +371,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--plain",
         type=bool,
-        default=True,
+        default=False,
         help="whether to compute the best f1, precision and recall or not",
     )
     parser.add_argument(
@@ -408,10 +399,10 @@ if __name__ == "__main__":
     logger.log(str(args))
 
     # compute evaluation on long answers and short answers
-    gold_label = load_gold_labels(args)
+    gold_label = load_gold_labels(args.eval_data_dir)
     # load prediction data and transform to nq_lable structure
     # id: nq_label
-    pred_label = load_prediction_labels(args)
+    pred_label = load_prediction_labels(args.eval_result_dir)
 
     long_answer_stats, short_answer_stats = score_predictions(
         args, gold_label, pred_label
